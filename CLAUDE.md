@@ -9,13 +9,20 @@
 ## 目录结构
 ```
 api/src/routes/       → API 路由层
-api/src/services/     → 业务逻辑层（核心）
+api/src/services/     → 业务逻辑层（现货 + 合约）
+api/src/strategy/     → 策略引擎（剥头皮）
+api/src/types/        → TypeScript 类型定义
 api/src/utils/        → 工具模块
 api/src/config/       → 配置层（Bitget SDK 初始化、数据库连接）
 api/src/middleware/    → 中间件（错误处理、限流）
 api/migrations/       → 数据库迁移脚本
-frontend/app/         → Next.js 页面（后续开发）
-frontend/components/  → React 组件（后续开发）
+api/scripts/          → 启动脚本（迁移 + 启动）
+frontend/app/         → Next.js 14 App Router
+frontend/components/  → React 组件（策略面板）
+frontend/hooks/       → SWR 数据钩子
+frontend/lib/         → 工具库（API 客户端、类型、格式化）
+nginx/                → 反向代理配置
+docker-compose.yml    → Docker 服务编排
 docs/                 → 项目文档
 .claude/agents/       → Claude Code agent 定义
 ```
@@ -40,6 +47,21 @@ docs/                 → 项目文档
 - `order-execution.service.ts` → 订单执行（现货下单、撤单、查询）
 - `capital-manager.service.ts` → 资金管理（账户资产、资金分配）
 - `log.service.ts` → 异步日志队列（级别门控 + 节流）
+- `futures-market-data.service.ts` → 合约行情（盘口深度、Ticker）
+- `futures-order.service.ts` → 合约订单（下单、撤单、批量撤单、挂单查询）
+- `futures-account.service.ts` → 合约账户（余额、权益）
+
+## 策略引擎
+- `scalping-strategy.engine.ts` → 主策略引擎（状态机 + 双循环）
+- `strategy-config.manager.ts` → 运行时配置管理（热更新）
+- `order-state-tracker.ts` → 内存订单状态追踪 + 对账
+- `risk-controller.ts` → 风控（回撤、止损、日亏限制）
+- `merge-engine.ts` → 挂单合并（加权平均价）
+
+## 部署
+- Docker Compose: nginx(80) + api(3001) + frontend(3000) + postgres(5432)
+- PostgreSQL 数据持久化: pg_data named volume
+- API 启动时自动运行数据库迁移
 
 ## 编码标准
 - TypeScript 严格类型，禁用 `any`

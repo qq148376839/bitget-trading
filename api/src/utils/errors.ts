@@ -1,0 +1,75 @@
+/**
+ * 统一错误处理模块
+ */
+
+export class AppError extends Error {
+  public readonly code: string;
+  public readonly statusCode: number;
+  public readonly details?: unknown;
+
+  constructor(code: string, message: string, details?: unknown, statusCode = 500) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+    Object.setPrototypeOf(this, AppError.prototype);
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      code: this.code,
+      message: this.message,
+      details: this.details,
+    };
+  }
+}
+
+/**
+ * 错误码定义
+ */
+export const ErrorCode = {
+  // 通用错误
+  INTERNAL_ERROR: 'INTERNAL_ERROR',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  NOT_FOUND: 'NOT_FOUND',
+  UNAUTHORIZED: 'UNAUTHORIZED',
+
+  // Bitget API 错误
+  BITGET_API_ERROR: 'BITGET_API_ERROR',
+  BITGET_AUTH_ERROR: 'BITGET_AUTH_ERROR',
+  BITGET_RATE_LIMIT: 'BITGET_RATE_LIMIT',
+  BITGET_TIMEOUT: 'BITGET_TIMEOUT',
+
+  // 资金错误
+  INSUFFICIENT_FUNDS: 'INSUFFICIENT_FUNDS',
+  FUND_ALLOCATION_FAILED: 'FUND_ALLOCATION_FAILED',
+  FUND_RELEASE_FAILED: 'FUND_RELEASE_FAILED',
+
+  // 订单错误
+  ORDER_SUBMIT_FAILED: 'ORDER_SUBMIT_FAILED',
+  ORDER_CANCEL_FAILED: 'ORDER_CANCEL_FAILED',
+  ORDER_NOT_FOUND: 'ORDER_NOT_FOUND',
+  ORDER_INVALID_PARAMS: 'ORDER_INVALID_PARAMS',
+  ORDER_PRECISION_ERROR: 'ORDER_PRECISION_ERROR',
+
+  // 合约错误
+  FUTURES_ORDER_FAILED: 'FUTURES_ORDER_FAILED',
+  FUTURES_CANCEL_FAILED: 'FUTURES_CANCEL_FAILED',
+  FUTURES_BATCH_CANCEL_FAILED: 'FUTURES_BATCH_CANCEL_FAILED',
+
+  // 策略错误
+  STRATEGY_EXECUTION_FAILED: 'STRATEGY_EXECUTION_FAILED',
+  STRATEGY_NOT_FOUND: 'STRATEGY_NOT_FOUND',
+  STRATEGY_ALREADY_RUNNING: 'STRATEGY_ALREADY_RUNNING',
+  STRATEGY_NOT_RUNNING: 'STRATEGY_NOT_RUNNING',
+  STRATEGY_CONFIG_INVALID: 'STRATEGY_CONFIG_INVALID',
+  STRATEGY_RISK_LIMIT: 'STRATEGY_RISK_LIMIT',
+  STRATEGY_MERGE_FAILED: 'STRATEGY_MERGE_FAILED',
+
+  // 数据库错误
+  DATABASE_ERROR: 'DATABASE_ERROR',
+  TRANSACTION_FAILED: 'TRANSACTION_FAILED',
+} as const;
+
+export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode];

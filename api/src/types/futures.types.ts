@@ -81,6 +81,24 @@ export interface FuturesPendingOrder {
   uTime: string;
 }
 
+/** 订单详情返回 */
+export interface FuturesOrderDetail {
+  orderId: string;
+  clientOid: string;
+  symbol: string;
+  size: string;
+  filledQty: string;
+  fee: string;
+  price: string;
+  side: FuturesSide;
+  orderType: FuturesOrderType;
+  force: TimeInForce;
+  tradeSide: TradeSide;
+  state: string;  // 'live' | 'partially_filled' | 'filled' | 'cancelled'
+  cTime: string;
+  uTime: string;
+}
+
 /** 盘口深度 */
 export interface FuturesOrderBook {
   asks: Array<[string, string]>;  // [price, size]
@@ -107,6 +125,44 @@ export interface FuturesTickerInfo {
   fundingRate: string;
   markPrice: string;
   indexPrice: string;
+}
+
+/** Bitget 合约规格（API 原始返回） */
+export interface BitgetContractSpec {
+  symbol: string;
+  baseCoin: string;
+  quoteCoin: string;
+  buyLimitPriceRatio: string;
+  sellLimitPriceRatio: string;
+  feeRateUpRatio: string;
+  makerFeeRate: string;
+  takerFeeRate: string;
+  openCostUpRatio: string;
+  supportMarginCoins: string[];
+  minTradeNum: string;
+  priceEndStep: string;
+  volumePlace: string;
+  pricePlace: string;
+  sizeMultiplier: string;
+  symbolType: string;
+  minTradeUSDT: string;
+  maxSymbolOrderNum: string;
+  maxProductOrderNum: string;
+  maxPositionNum: string;
+  symbolStatus: string;
+}
+
+/** 合约规格信息（内部使用的精简版） */
+export interface ContractSpecInfo {
+  symbol: string;
+  baseCoin: string;
+  quoteCoin: string;
+  pricePlace: number;
+  volumePlace: number;
+  minTradeNum: number;
+  sizeMultiplier: number;
+  makerFeeRate: number;
+  takerFeeRate: number;
 }
 
 /** 合约账户信息 */

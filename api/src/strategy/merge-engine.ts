@@ -4,8 +4,9 @@
  */
 
 import { TrackedOrder, ScalpingStrategyConfig } from '../types/strategy.types';
-import { FuturesOrderService } from '../services/futures-order.service';
+import { IOrderService } from '../services/interfaces/i-order.service';
 import { OrderStateTracker } from './order-state-tracker';
+import { HoldMode } from '../services/futures-account.service';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
 
@@ -20,23 +21,30 @@ export interface MergeResult {
 }
 
 export class MergeEngine {
-  private orderService: FuturesOrderService;
+  private orderService: IOrderService;
   private tracker: OrderStateTracker;
   private config: ScalpingStrategyConfig;
+  private holdMode: HoldMode;
   private merging = false;
 
   constructor(
-    orderService: FuturesOrderService,
+    orderService: IOrderService,
     tracker: OrderStateTracker,
-    config: ScalpingStrategyConfig
+    config: ScalpingStrategyConfig,
+    holdMode: HoldMode = 'double_hold'
   ) {
     this.orderService = orderService;
     this.tracker = tracker;
     this.config = config;
+    this.holdMode = holdMode;
   }
 
   updateConfig(config: ScalpingStrategyConfig): void {
     this.config = config;
+  }
+
+  updateHoldMode(holdMode: HoldMode): void {
+    this.holdMode = holdMode;
   }
 
   /**
@@ -96,7 +104,6 @@ export class MergeEngine {
         const batch = orderIds.slice(i, i + 50);
         const result = await this.orderService.batchCancelOrders({
           symbol: this.config.symbol,
-          productType: this.config.productType,
           orderIdList: batch.map(id => ({ orderId: id })),
         });
 
@@ -123,15 +130,12 @@ export class MergeEngine {
       const clientOid = `scalp_${this.config.symbol}_merge_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const placeResult = await this.orderService.placeOrder({
         symbol: this.config.symbol,
-        productType: this.config.productType,
-        marginMode: this.config.marginMode,
-        marginCoin: this.config.marginCoin,
         size: totalSizeStr,
         side: 'sell',
         orderType: 'limit',
         price: avgPriceStr,
         force: 'post_only',
-        tradeSide: 'close',
+        tradeSide: (this.config.tradingType === 'futures' && this.holdMode === 'double_hold') ? 'close' : undefined,
         clientOid,
       });
 
@@ -144,7 +148,7 @@ export class MergeEngine {
         size: totalSizeStr,
         status: 'pending',
         linkedOrderId: null,
-        direction: this.config.direction,
+        direction: this.config.direction || 'long',
         createdAt: Date.now(),
         filledAt: null,
       });

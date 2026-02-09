@@ -1,30 +1,32 @@
 /**
  * 策略控制 REST API
+ * 使用 StrategyManager 管理策略生命周期
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { ScalpingStrategyEngine } from '../strategy/scalping-strategy.engine';
-import { ScalpingStrategyConfig } from '../types/strategy.types';
+import { StrategyManager } from '../strategy/strategy-manager';
+import { AnyStrategyConfig } from '../types/strategy.types';
 import { CapitalManagerService } from '../services/capital-manager.service';
 import { FuturesAccountService } from '../services/futures-account.service';
+import { AutoCalcService } from '../strategy/auto-calc.service';
 
 const router = Router();
 
 /**
  * POST /api/strategy/start
  * 启动策略
- * Body: 可选的配置覆盖参数
+ * Body: 可选的配置覆盖参数（含 strategyType, tradingType）
  */
 router.post('/start', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const overrides = req.body as Partial<ScalpingStrategyConfig> | undefined;
-    const engine = ScalpingStrategyEngine.getInstance();
-    await engine.start(overrides);
+    const overrides = req.body as Partial<AnyStrategyConfig> | undefined;
+    const manager = StrategyManager.getInstance();
+    await manager.createAndStart(overrides);
 
     res.json({
       success: true,
       message: '策略已启动',
-      data: engine.getState(),
+      data: manager.getState(),
     });
   } catch (error) {
     next(error);
@@ -37,13 +39,13 @@ router.post('/start', async (req: Request, res: Response, next: NextFunction) =>
  */
 router.post('/stop', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const engine = ScalpingStrategyEngine.getInstance();
-    await engine.stop();
+    const manager = StrategyManager.getInstance();
+    await manager.stopActive();
 
     res.json({
       success: true,
       message: '策略已停止',
-      data: engine.getState(),
+      data: manager.getState(),
     });
   } catch (error) {
     next(error);
@@ -55,8 +57,8 @@ router.post('/stop', async (req: Request, res: Response, next: NextFunction) => 
  * 获取策略状态
  */
 router.get('/status', async (req: Request, res: Response) => {
-  const engine = ScalpingStrategyEngine.getInstance();
-  const state = engine.getState();
+  const manager = StrategyManager.getInstance();
+  const state = manager.getState();
 
   // 并行获取现货余额和合约余额
   const [spotResult, futuresResult] = await Promise.allSettled([
@@ -83,9 +85,20 @@ router.get('/status', async (req: Request, res: Response) => {
  */
 router.put('/config', (req: Request, res: Response, next: NextFunction) => {
   try {
-    const changes = req.body as Partial<ScalpingStrategyConfig>;
-    const engine = ScalpingStrategyEngine.getInstance();
-    const newConfig = engine.updateConfig(changes);
+    const changes = req.body as Record<string, unknown>;
+    const manager = StrategyManager.getInstance();
+    const strategy = manager.getActiveStrategy();
+
+    if (!strategy) {
+      // No active strategy, still allow config update via creating a temporary start
+      res.status(400).json({
+        success: false,
+        error: { code: 'STRATEGY_NOT_RUNNING', message: '没有活跃的策略实例' },
+      });
+      return;
+    }
+
+    const newConfig = strategy.updateConfig(changes);
 
     res.json({
       success: true,
@@ -102,8 +115,9 @@ router.put('/config', (req: Request, res: Response, next: NextFunction) => {
  * 查看追踪的订单
  */
 router.get('/orders', (req: Request, res: Response) => {
-  const engine = ScalpingStrategyEngine.getInstance();
-  const orders = engine.getTrackedOrders();
+  const manager = StrategyManager.getInstance();
+  const strategy = manager.getActiveStrategy();
+  const orders = strategy?.getTrackedOrders() || [];
 
   res.json({
     success: true,
@@ -123,13 +137,13 @@ router.get('/orders', (req: Request, res: Response) => {
  */
 router.post('/emergency-stop', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const engine = ScalpingStrategyEngine.getInstance();
-    await engine.emergencyStop();
+    const manager = StrategyManager.getInstance();
+    await manager.emergencyStopActive();
 
     res.json({
       success: true,
       message: '紧急停止完成，所有挂单已撤销',
-      data: engine.getState(),
+      data: manager.getState(),
     });
   } catch (error) {
     next(error);
@@ -141,10 +155,30 @@ router.post('/emergency-stop', async (req: Request, res: Response, next: NextFun
  * 盈亏汇总
  */
 router.get('/pnl', (req: Request, res: Response) => {
-  const engine = ScalpingStrategyEngine.getInstance();
+  const manager = StrategyManager.getInstance();
+  const strategy = manager.getActiveStrategy();
+
+  if (!strategy) {
+    res.json({
+      success: true,
+      data: {
+        realizedPnl: '0',
+        unrealizedPnl: '0',
+        dailyPnl: '0',
+        totalTrades: 0,
+        winTrades: 0,
+        lossTrades: 0,
+        winRate: '0',
+        avgWin: '0',
+        avgLoss: '0',
+      },
+    });
+    return;
+  }
+
   res.json({
     success: true,
-    data: engine.getPnlSummary(),
+    data: strategy.getPnlSummary(),
   });
 });
 
@@ -154,11 +188,55 @@ router.get('/pnl', (req: Request, res: Response) => {
  */
 router.get('/events', (req: Request, res: Response) => {
   const limit = parseInt(req.query.limit as string) || 50;
-  const engine = ScalpingStrategyEngine.getInstance();
+  const manager = StrategyManager.getInstance();
+  const strategy = manager.getActiveStrategy();
+
   res.json({
     success: true,
-    data: engine.getEvents(limit),
+    data: strategy?.getEvents(limit) || [],
   });
+});
+
+/**
+ * POST /api/strategy/auto-calc
+ * Simple mode: auto-calculate full config
+ */
+router.post('/auto-calc', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const input = req.body;
+    const autoCalcService = new AutoCalcService();
+    const result = await autoCalcService.calculate(input);
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/strategy/bounds
+ * Advanced mode: get dynamic parameter bounds
+ */
+router.get('/bounds', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { symbol, tradingType, strategyType } = req.query;
+    const autoCalcService = new AutoCalcService();
+    const bounds = await autoCalcService.getBounds(
+      symbol as string || 'BTCUSDT',
+      (tradingType as string || 'futures') as 'futures' | 'spot',
+      (strategyType as string || 'scalping') as 'scalping' | 'grid'
+    );
+
+    res.json({
+      success: true,
+      data: bounds,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 export default router;

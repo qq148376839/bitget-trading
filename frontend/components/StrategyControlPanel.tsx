@@ -121,10 +121,10 @@ export default function StrategyControlPanel() {
               <Text strong>{status.config?.symbol || '-'}</Text>
             </Descriptions.Item>
             <Descriptions.Item label="方向">
-              {status.config ? DIRECTION_LABELS[status.config.direction] || status.config.direction : '-'}
+              {status.config?.direction ? DIRECTION_LABELS[status.config.direction] || status.config.direction : '-'}
             </Descriptions.Item>
             <Descriptions.Item label="杠杆">
-              {status.config ? `${status.config.leverage}x` : '-'}
+              {status.config?.leverage ? `${status.config.leverage}x` : '-'}
             </Descriptions.Item>
           </Descriptions>
           {status.lastError && (

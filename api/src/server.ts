@@ -17,8 +17,12 @@ import accountRouter from './routes/account';
 import ordersRouter from './routes/orders';
 import marketRouter from './routes/market';
 import strategyRouter from './routes/strategy';
-import { ScalpingStrategyEngine } from './strategy/scalping-strategy.engine';
+import contractsRouter from './routes/contracts';
+import instrumentsRouter from './routes/instruments';
+import { StrategyManager } from './strategy/strategy-manager';
 import { createLogger } from './utils/logger';
+import { getPool } from './config/database';
+import { runMigrations } from './config/migration-runner';
 
 const logger = createLogger('server');
 const app = express();
@@ -35,27 +39,44 @@ app.use('/api/account', accountRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/market', marketRouter);
 app.use('/api/strategy', strategyRouter);
+app.use('/api/contracts', contractsRouter);
+app.use('/api/instruments', instrumentsRouter);
 
 // 错误处理
 app.use(errorHandler);
 
-// 启动服务
-const server = app.listen(PORT, () => {
-  logger.info(`Bitget Trading API 已启动`, { port: PORT });
-  logger.info(`健康检查: http://localhost:${PORT}/api/health`);
-});
+// 启动引导
+let server: ReturnType<typeof app.listen>;
+
+async function bootstrap(): Promise<void> {
+  try {
+    const pool = getPool();
+    await runMigrations(pool);
+    logger.info('数据库迁移完成');
+  } catch (error) {
+    logger.error('数据库迁移失败，终止启动', { error: String(error) });
+    process.exit(1);
+  }
+
+  server = app.listen(PORT, () => {
+    logger.info(`Bitget Trading API 已启动`, { port: PORT });
+    logger.info(`健康检查: http://localhost:${PORT}/api/health`);
+  });
+}
+
+bootstrap();
 
 // 优雅关闭
 async function gracefulShutdown(signal: string): Promise<void> {
   logger.info(`收到 ${signal} 信号，开始优雅关闭...`);
 
-  // 停止策略引擎
+  // 停止策略管理器
   try {
-    const engine = ScalpingStrategyEngine.getInstance();
-    await engine.stop();
-    logger.info('策略引擎已停止');
+    const manager = StrategyManager.getInstance();
+    await manager.stopActive();
+    logger.info('策略管理器已停止');
   } catch (error) {
-    logger.warn('停止策略引擎出错', { error: String(error) });
+    logger.warn('停止策略管理器出错', { error: String(error) });
   }
 
   server.close(() => {

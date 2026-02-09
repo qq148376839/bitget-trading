@@ -15,15 +15,23 @@
  *   5. 挂单数 >= maxPendingOrders → 触发合并
  */
 
-import { FuturesMarketDataService } from '../services/futures-market-data.service';
-import { FuturesOrderService } from '../services/futures-order.service';
-import { FuturesAccountService } from '../services/futures-account.service';
+import { IStrategy } from './interfaces/i-strategy';
+import { IOrderService } from '../services/interfaces/i-order.service';
+import { IMarketDataService } from '../services/interfaces/i-market-data.service';
+import { IAccountService } from '../services/interfaces/i-account.service';
+import { TradingServices } from '../services/trading-service.factory';
+import { ContractSpecService } from '../services/contract-spec.service';
+import { FuturesAccountService, HoldMode } from '../services/futures-account.service';
+import { StrategyPersistenceService } from '../services/strategy-persistence.service';
 import { OrderStateTracker } from './order-state-tracker';
 import { RiskController } from './risk-controller';
 import { MergeEngine } from './merge-engine';
 import { StrategyConfigManager } from './strategy-config.manager';
 import {
   ScalpingStrategyConfig,
+  DEFAULT_SCALPING_CONFIG,
+  BaseStrategyConfig,
+  AnyStrategyConfig,
   StrategyState,
   StrategyStatus,
   StrategyEvent,
@@ -31,6 +39,9 @@ import {
   TrackedOrder,
   PnlSummary,
 } from '../types/strategy.types';
+import { StrategyType } from '../types/trading.types';
+import { ContractSpecInfo } from '../types/futures.types';
+import { InstrumentSpec } from '../types/trading.types';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
 
@@ -38,9 +49,11 @@ const logger = createLogger('scalping-engine');
 
 const MAX_CONSECUTIVE_ERRORS = 5;
 const ERROR_RECOVERY_DELAY_MS = 30000;
+const POST_ONLY_CANCEL_COOLDOWN_MS = 3000;
 
-export class ScalpingStrategyEngine {
-  private static instance: ScalpingStrategyEngine | null = null;
+export class ScalpingStrategyEngine implements IStrategy {
+  readonly strategyType: StrategyType = 'scalping';
+  readonly instanceId: string;
 
   private status: StrategyStatus = 'STOPPED';
   private configManager: StrategyConfigManager | null = null;
@@ -48,9 +61,9 @@ export class ScalpingStrategyEngine {
   private riskController: RiskController | null = null;
   private mergeEngine: MergeEngine | null = null;
 
-  private marketDataService: FuturesMarketDataService;
-  private orderService: FuturesOrderService;
-  private accountService: FuturesAccountService;
+  private orderService: IOrderService;
+  private marketDataService: IMarketDataService;
+  private accountService: IAccountService;
 
   private loopATimer: ReturnType<typeof setTimeout> | null = null;
   private loopBTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,27 +73,55 @@ export class ScalpingStrategyEngine {
   private tradeCount = 0;
   private realizedPnl = 0;
 
+  private contractSpec: ContractSpecInfo | null = null;
+  private instrumentSpec: InstrumentSpec | null = null;
+  private unrealizedPnl = '0';
+  private persistenceService: StrategyPersistenceService;
+  private lastConfig: ScalpingStrategyConfig = DEFAULT_SCALPING_CONFIG;
+  private configLoaded = false;
+
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
+  private lastBuyCancelledAt = 0; // 上次买单被交易所撤销的时间（用于防止 post_only 快速循环）
+  private holdMode: HoldMode = 'double_hold'; // 持仓模式：single_hold=单向, double_hold=双向（默认双向更安全）
+  private consecutivePostOnlyCancels = 0; // 连续 post_only 被撤次数（用于自适应调整）
 
-  private constructor() {
-    this.marketDataService = new FuturesMarketDataService();
-    this.orderService = new FuturesOrderService();
-    this.accountService = new FuturesAccountService();
+  constructor(services: TradingServices, instanceId = 'default') {
+    this.orderService = services.orderService;
+    this.marketDataService = services.marketDataService;
+    this.accountService = services.accountService;
     this.tracker = new OrderStateTracker();
+    this.persistenceService = StrategyPersistenceService.getInstance();
+    this.instanceId = instanceId;
   }
 
-  static getInstance(): ScalpingStrategyEngine {
-    if (!ScalpingStrategyEngine.instance) {
-      ScalpingStrategyEngine.instance = new ScalpingStrategyEngine();
+  /**
+   * 从 DB 加载上次活跃配置
+   */
+  async loadLastConfig(): Promise<void> {
+    try {
+      const config = await this.persistenceService.loadActiveConfig();
+      if (config && !this.configLoaded) {
+        // Ensure backwards compatibility: old configs without strategyType/tradingType
+        this.lastConfig = {
+          ...DEFAULT_SCALPING_CONFIG,
+          ...config,
+          strategyType: 'scalping',
+          tradingType: config.tradingType || 'futures',
+          instanceId: config.instanceId || this.instanceId,
+        } as ScalpingStrategyConfig;
+        this.configLoaded = true;
+        logger.info('已从 DB 恢复上次策略配置', { symbol: config.symbol });
+      }
+    } catch (error) {
+      logger.warn('加载上次配置失败', { error: String(error) });
     }
-    return ScalpingStrategyEngine.instance;
   }
 
   /**
    * 启动策略
    */
-  async start(overrides?: Partial<ScalpingStrategyConfig>): Promise<void> {
+  async start(overrides?: Partial<BaseStrategyConfig>): Promise<void> {
     if (this.status === 'RUNNING' || this.status === 'STARTING') {
       throw new AppError(
         ErrorCode.STRATEGY_ALREADY_RUNNING,
@@ -94,21 +135,70 @@ export class ScalpingStrategyEngine {
     logger.info('策略启动中...');
 
     try {
-      // 初始化配置
-      this.configManager = new StrategyConfigManager(overrides);
-      const config = this.configManager.getConfig();
+      // 初始化配置：优先使用 overrides，其次 DB 恢复的上次配置
+      const baseOverrides = this.configLoaded
+        ? { ...this.lastConfig, ...overrides }
+        : overrides;
+      const configInput = {
+        strategyType: 'scalping' as const,
+        tradingType: baseOverrides?.tradingType || this.lastConfig.tradingType,
+        instanceId: this.instanceId,
+        ...baseOverrides,
+      };
+      this.configManager = new StrategyConfigManager(configInput);
+      const config = this.configManager.getScalpingConfig();
+
+      // 获取合约/现货规格并自动覆盖精度
+      if (config.tradingType === 'futures' && config.productType) {
+        try {
+          const specService = ContractSpecService.getInstance();
+          this.contractSpec = await specService.refreshSpec(config.symbol, config.productType);
+          logger.info('Contract spec fetched', {
+            symbol: config.symbol,
+            pricePlace: this.contractSpec.pricePlace,
+            volumePlace: this.contractSpec.volumePlace,
+            minTradeNum: this.contractSpec.minTradeNum,
+            makerFeeRate: this.contractSpec.makerFeeRate,
+            takerFeeRate: this.contractSpec.takerFeeRate,
+          });
+
+          // 自动覆盖精度配置
+          this.configManager.update({
+            pricePrecision: this.contractSpec.pricePlace,
+            sizePrecision: this.contractSpec.volumePlace,
+          });
+
+          // 手续费覆盖检查
+          this.checkFeeCoverage(config, this.contractSpec);
+        } catch (error) {
+          logger.warn('获取合约规格失败，使用手动配置的精度', { error: String(error) });
+        }
+      }
+
+      // 检测持仓模式（单向/双向）
+      if (config.tradingType === 'futures' && config.productType) {
+        try {
+          const accountService = new FuturesAccountService();
+          this.holdMode = await accountService.getHoldMode(config.productType);
+          logger.info('持仓模式检测', { holdMode: this.holdMode });
+        } catch (error) {
+          logger.warn('持仓模式检测失败，默认双向持仓', { error: String(error) });
+          this.holdMode = 'double_hold';
+        }
+      }
 
       // 获取初始权益
-      const { equity } = await this.accountService.getAccountEquity(
-        config.productType,
-        config.marginCoin
+      const { equity, unrealizedPL } = await this.accountService.getAccountEquity(
+        config.marginCoin || 'USDT'
       );
       const initialEquity = parseFloat(equity);
-      logger.info('初始权益', { equity: initialEquity, marginCoin: config.marginCoin });
+      this.unrealizedPnl = unrealizedPL;
+      logger.info('初始权益', { equity: initialEquity, marginCoin: config.marginCoin, unrealizedPL });
 
       // 初始化组件
-      this.riskController = new RiskController(config, initialEquity);
-      this.mergeEngine = new MergeEngine(this.orderService, this.tracker, config);
+      const finalConfig = this.configManager.getScalpingConfig();
+      this.riskController = new RiskController(finalConfig, initialEquity);
+      this.mergeEngine = new MergeEngine(this.orderService, this.tracker, finalConfig, this.holdMode);
       this.tracker.clear();
       this.lastBidPrice = null;
       this.consecutiveErrors = 0;
@@ -116,9 +206,30 @@ export class ScalpingStrategyEngine {
       this.tradeCount = 0;
       this.realizedPnl = 0;
 
+      // 尝试从 DB 恢复 pending 订单
+      try {
+        const pendingOrders = await this.persistenceService.loadPendingOrders(
+          finalConfig.symbol,
+          finalConfig.productType || ''
+        );
+        if (pendingOrders.length > 0) {
+          for (const order of pendingOrders) {
+            this.tracker.addOrder(order);
+          }
+          logger.info('Recovering pending orders', { count: pendingOrders.length });
+        }
+      } catch (error) {
+        logger.warn('恢复 pending 订单失败', { error: String(error) });
+      }
+
       this.status = 'RUNNING';
-      this.emitEvent('STRATEGY_STARTED', { config });
-      logger.info('策略已启动', { symbol: config.symbol, direction: config.direction });
+      // 保存配置到 DB 并缓存
+      this.lastConfig = this.configManager.getScalpingConfig();
+      this.configLoaded = true;
+      this.persistenceService.saveActiveConfig(this.lastConfig);
+
+      this.emitEvent('STRATEGY_STARTED', { config: this.lastConfig });
+      logger.info('策略已启动', { symbol: this.lastConfig.symbol, direction: this.lastConfig.direction });
 
       // 启动双循环
       this.scheduleLoopA();
@@ -155,10 +266,9 @@ export class ScalpingStrategyEngine {
     const activeBuy = this.tracker.getActiveBuyOrder();
     if (activeBuy && this.configManager) {
       try {
-        const config = this.configManager.getConfig();
+        const config = this.configManager.getScalpingConfig();
         await this.orderService.cancelOrder({
           symbol: config.symbol,
-          productType: config.productType,
           orderId: activeBuy.orderId,
         });
         this.tracker.markCancelled(activeBuy.orderId);
@@ -194,7 +304,7 @@ export class ScalpingStrategyEngine {
     }
 
     if (this.configManager) {
-      const config = this.configManager.getConfig();
+      const config = this.configManager.getScalpingConfig();
       const allPending = this.tracker.getAllOrders().filter(o => o.status === 'pending');
 
       // 批量撤单
@@ -204,7 +314,6 @@ export class ScalpingStrategyEngine {
         try {
           await this.orderService.batchCancelOrders({
             symbol: config.symbol,
-            productType: config.productType,
             orderIdList: batch.map(id => ({ orderId: id })),
           });
           this.tracker.markBatchCancelled(batch);
@@ -221,30 +330,48 @@ export class ScalpingStrategyEngine {
   /**
    * 更新配置
    */
-  updateConfig(changes: Partial<ScalpingStrategyConfig>): ScalpingStrategyConfig {
-    if (!this.configManager) {
-      throw new AppError(ErrorCode.STRATEGY_NOT_RUNNING, '策略未运行，无法更新配置', {}, 400);
+  updateConfig(changes: Record<string, unknown>): BaseStrategyConfig {
+    if (this.configManager) {
+      const newConfig = this.configManager.update(changes as Partial<AnyStrategyConfig>);
+      const scalpingConfig = newConfig as ScalpingStrategyConfig;
+      if (this.riskController) {
+        this.riskController.updateConfig(scalpingConfig);
+      }
+      if (this.mergeEngine) {
+        this.mergeEngine.updateConfig(scalpingConfig);
+      }
+      this.lastConfig = scalpingConfig;
+      this.persistenceService.saveActiveConfig(scalpingConfig);
+      this.emitEvent('CONFIG_UPDATED', { changes, state: 'running' });
+      return scalpingConfig;
     }
-    const newConfig = this.configManager.update(changes);
-    if (this.riskController) {
-      this.riskController.updateConfig(newConfig);
-    }
-    if (this.mergeEngine) {
-      this.mergeEngine.updateConfig(newConfig);
-    }
-    this.emitEvent('CONFIG_UPDATED', { changes });
+
+    // 停止状态
+    const tempManager = new StrategyConfigManager({ ...this.lastConfig, ...changes });
+    const newConfig = tempManager.getScalpingConfig();
+    this.lastConfig = newConfig;
+    this.persistenceService.saveActiveConfig(newConfig);
+    this.emitEvent('CONFIG_UPDATED', { changes, state: 'stopped' });
+    logger.info('已更新停止态配置', { changes });
     return newConfig;
+  }
+
+  getStatus(): StrategyStatus {
+    return this.status;
   }
 
   /**
    * 获取策略状态
    */
   getState(): StrategyState {
-    const config = this.configManager?.getConfig() || null;
+    const config = this.configManager?.getScalpingConfig() || this.lastConfig;
     const riskStats = this.riskController?.getStats();
 
     return {
       status: this.status,
+      strategyType: 'scalping',
+      tradingType: config.tradingType,
+      instanceId: this.instanceId,
       config,
       activeBuyOrderId: this.tracker.getActiveBuyOrderId(),
       lastBidPrice: this.lastBidPrice,
@@ -253,7 +380,7 @@ export class ScalpingStrategyEngine {
       spotAvailableUsdt: '0',
       futuresAvailableUsdt: '0',
       realizedPnl: this.realizedPnl.toFixed(4),
-      unrealizedPnl: '0', // TODO: 从交易所获取
+      unrealizedPnl: this.unrealizedPnl,
       dailyPnl: riskStats ? riskStats.dailyPnl.toFixed(4) : '0',
       tradeCount: this.tradeCount,
       errorCount: this.consecutiveErrors,
@@ -263,21 +390,15 @@ export class ScalpingStrategyEngine {
     };
   }
 
-  /**
-   * 获取追踪的订单
-   */
   getTrackedOrders(): TrackedOrder[] {
     return this.tracker.getAllOrders();
   }
 
-  /**
-   * 获取 PnL 汇总
-   */
   getPnlSummary(): PnlSummary {
     const stats = this.riskController?.getStats();
     return {
       realizedPnl: this.realizedPnl.toFixed(4),
-      unrealizedPnl: '0',
+      unrealizedPnl: this.unrealizedPnl,
       dailyPnl: stats ? stats.dailyPnl.toFixed(4) : '0',
       totalTrades: stats?.totalTrades || 0,
       winTrades: stats?.winTrades || 0,
@@ -288,9 +409,6 @@ export class ScalpingStrategyEngine {
     };
   }
 
-  /**
-   * 获取事件日志
-   */
   getEvents(limit = 50): StrategyEvent[] {
     return this.events.slice(-limit);
   }
@@ -301,7 +419,7 @@ export class ScalpingStrategyEngine {
 
   private scheduleLoopA(): void {
     if (this.status !== 'RUNNING') return;
-    const config = this.configManager!.getConfig();
+    const config = this.configManager!.getScalpingConfig();
     this.loopATimer = setTimeout(() => this.runLoopA(), config.pollIntervalMs);
   }
 
@@ -309,7 +427,7 @@ export class ScalpingStrategyEngine {
     if (this.status !== 'RUNNING') return;
 
     try {
-      const config = this.configManager!.getConfig();
+      const config = this.configManager!.getScalpingConfig();
 
       // 风控检查
       const positionUsdt = parseFloat(this.tracker.getTotalPositionUsdt());
@@ -321,33 +439,50 @@ export class ScalpingStrategyEngine {
       }
 
       // 获取盘口 bid1
-      const bid1 = await this.marketDataService.getBestBid(config.symbol, config.productType);
+      const bid1 = await this.marketDataService.getBestBid(config.symbol);
+      const bid1Num = parseFloat(bid1);
+      const spread = parseFloat(config.priceSpread);
+      this.lastBidPrice = bid1;
 
-      if (bid1 !== this.lastBidPrice) {
-        // bid1 变化
-        const activeBuy = this.tracker.getActiveBuyOrder();
+      const activeBuy = this.tracker.getActiveBuyOrder();
 
-        if (activeBuy) {
-          // 撤旧买单
+      if (activeBuy && activeBuy.status === 'pending') {
+        const orderPrice = parseFloat(activeBuy.price);
+        const orderAge = Date.now() - activeBuy.createdAt;
+
+        const MIN_ORDER_LIFETIME_MS = 3000;
+        const overpaying = orderPrice > bid1Num + spread * 2;
+        const tooFarBelowBid = bid1Num - orderPrice > spread * 5;
+
+        if (orderAge >= MIN_ORDER_LIFETIME_MS && (overpaying || tooFarBelowBid)) {
           try {
             await this.orderService.cancelOrder({
               symbol: config.symbol,
-              productType: config.productType,
               orderId: activeBuy.orderId,
             });
             this.tracker.markCancelled(activeBuy.orderId);
-            this.emitEvent('BUY_ORDER_CANCELLED', { orderId: activeBuy.orderId, oldPrice: activeBuy.price });
+            this.emitEvent('BUY_ORDER_CANCELLED', {
+              orderId: activeBuy.orderId,
+              oldPrice: activeBuy.price,
+              reason: overpaying ? 'overpaying' : 'too_far_below_bid',
+              priceDiff: (orderPrice - bid1Num).toFixed(2),
+            });
           } catch (error) {
-            logger.warn('撤旧买单失败', { error: String(error) });
+            this.tracker.clearActiveBuy();
+            logger.debug('撤旧买单失败（可能已成交或已撤销）', { orderId: activeBuy.orderId });
           }
+          await this.placeBuyOrder(bid1, config);
         }
-
-        // 挂新买单
-        await this.placeBuyOrder(bid1, config);
-        this.lastBidPrice = bid1;
-      } else if (!this.tracker.getActiveBuyOrderId()) {
-        // bid1 未变但无活跃买单
-        await this.placeBuyOrder(bid1, config);
+      } else {
+        // 防止 post_only 被交易所撤销后立即重新下单造成快速循环
+        const timeSinceLastCancel = Date.now() - this.lastBuyCancelledAt;
+        if (this.lastBuyCancelledAt > 0 && timeSinceLastCancel < POST_ONLY_CANCEL_COOLDOWN_MS) {
+          logger.debug('post_only 冷却中，跳过本轮挂单', {
+            cooldownRemaining: POST_ONLY_CANCEL_COOLDOWN_MS - timeSinceLastCancel,
+          });
+        } else {
+          await this.placeBuyOrder(bid1, config);
+        }
       }
 
       this.consecutiveErrors = 0;
@@ -358,31 +493,60 @@ export class ScalpingStrategyEngine {
     this.scheduleLoopA();
   }
 
-  /**
-   * 在 bid1 挂买单
-   */
   private async placeBuyOrder(bidPrice: string, config: ScalpingStrategyConfig): Promise<void> {
-    const price = bidPrice;
+    const tickSize = Math.pow(10, -config.pricePrecision);
+
+    // 自适应价格偏移：连续 post_only 被撤越多，偏移越大
+    // 基础偏移 2 tick，每连续被撤一次多偏移 1 tick，最大 10 tick
+    const baseTickOffset = 2;
+    const adaptiveTickOffset = Math.min(baseTickOffset + this.consecutivePostOnlyCancels, 10);
+    const adjustedPrice = parseFloat(bidPrice) - tickSize * adaptiveTickOffset;
+    const price = adjustedPrice.toFixed(config.pricePrecision);
+
+    // 如果连续被撤超过 5 次，改用 GTC（normal）模式 — 接受 taker 成交
+    const useGtc = this.consecutivePostOnlyCancels >= 5;
+    const force = useGtc ? 'normal' : 'post_only';
+
+    // 获取 ask1 用于诊断日志
+    let ask1: string | null = null;
+    try {
+      ask1 = await this.marketDataService.getBestAsk(config.symbol);
+    } catch {
+      // 非关键信息，忽略错误
+    }
+
     const size = this.calculateSize(config.orderAmountUsdt, price, config.sizePrecision);
+
+    if (!size) {
+      logger.warn('下单数量为零，跳过挂单', {
+        orderAmountUsdt: config.orderAmountUsdt,
+        price,
+        sizePrecision: config.sizePrecision,
+      });
+      return;
+    }
 
     const clientOid = `scalp_${config.symbol}_${config.direction}_buy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     try {
+      // 合约模式下始终发送 tradeSide
+      // 双向持仓 → 'open'; 单向持仓 → 不发（但默认 double_hold 以确保安全）
+      const buyTradeSide = config.tradingType === 'futures'
+        ? (this.holdMode === 'single_hold' ? undefined : 'open')
+        : undefined;
+
       const result = await this.orderService.placeOrder({
         symbol: config.symbol,
-        productType: config.productType,
-        marginMode: config.marginMode,
-        marginCoin: config.marginCoin,
         size,
         side: 'buy',
         orderType: 'limit',
         price,
-        force: 'post_only',
-        tradeSide: 'open',
+        force,
+        tradeSide: buyTradeSide,
         clientOid,
       });
 
-      this.tracker.addOrder({
+      const trackedOrder: TrackedOrder = {
         orderId: result.orderId,
         clientOid,
         side: 'buy',
@@ -390,14 +554,25 @@ export class ScalpingStrategyEngine {
         size,
         status: 'pending',
         linkedOrderId: null,
-        direction: config.direction,
+        direction: config.direction || 'long',
         createdAt: Date.now(),
         filledAt: null,
-      });
+      };
+      this.tracker.addOrder(trackedOrder);
+      this.persistenceService.persistNewOrder(trackedOrder, config.symbol, config.productType || '', config.marginCoin || 'USDT');
 
-      this.emitEvent('BUY_ORDER_PLACED', { orderId: result.orderId, price, size });
+      this.emitEvent('BUY_ORDER_PLACED', {
+        orderId: result.orderId,
+        price,
+        size,
+        bid1: bidPrice,
+        ask1,
+        tickOffset: adaptiveTickOffset,
+        force,
+        consecutivePostOnlyCancels: this.consecutivePostOnlyCancels,
+      });
     } catch (error) {
-      logger.warn('挂买单失败', { error: String(error), price, size });
+      logger.warn('挂买单失败', { error: String(error), price, size, bid1: bidPrice, ask1, force });
     }
   }
 
@@ -407,7 +582,7 @@ export class ScalpingStrategyEngine {
 
   private scheduleLoopB(): void {
     if (this.status !== 'RUNNING') return;
-    const config = this.configManager!.getConfig();
+    const config = this.configManager!.getScalpingConfig();
     this.loopBTimer = setTimeout(() => this.runLoopB(), config.orderCheckIntervalMs);
   }
 
@@ -415,17 +590,70 @@ export class ScalpingStrategyEngine {
     if (this.status !== 'RUNNING') return;
 
     try {
-      const config = this.configManager!.getConfig();
+      const config = this.configManager!.getScalpingConfig();
 
       // 查询交易所挂单
-      const exchangePending = await this.orderService.getPendingOrders(
-        config.symbol,
-        config.productType
-      );
+      const exchangePending = await this.orderService.getPendingOrders(config.symbol);
       const exchangePendingIds = new Set(exchangePending.map(o => o.orderId));
 
-      // 对账
-      const { filledBuyOrders, filledSellOrders } = this.tracker.reconcile(exchangePendingIds);
+      // 对账第一步：找出消失的订单
+      const disappeared = this.tracker.findDisappearedOrders(exchangePendingIds);
+
+      // 对账第二步：通过订单详情 API 确认真实状态
+      const filledBuyOrders: TrackedOrder[] = [];
+      const filledSellOrders: TrackedOrder[] = [];
+
+      for (const { order } of disappeared) {
+        try {
+          const detail = await this.orderService.getOrderDetail(config.symbol, order.orderId);
+
+          if (detail.state === 'filled') {
+            const confirmed = this.tracker.confirmFilled(order.orderId);
+            if (confirmed) {
+              this.persistenceService.persistOrderStatusChange(
+                order.orderId, 'filled', confirmed.filledAt || Date.now(), confirmed.linkedOrderId
+              );
+              if (confirmed.side === 'buy') {
+                filledBuyOrders.push(confirmed);
+                // 买单成交，重置 post_only 连续被撤计数
+                this.consecutivePostOnlyCancels = 0;
+              } else {
+                filledSellOrders.push(confirmed);
+              }
+            }
+          } else if (detail.state === 'live' || detail.state === 'partially_filled') {
+            logger.debug('订单仍在交易所活跃，跳过', {
+              orderId: order.orderId,
+              side: order.side,
+              state: detail.state,
+            });
+          } else {
+            this.tracker.markExchangeCancelled(order.orderId);
+            this.persistenceService.persistOrderStatusChange(order.orderId, 'cancelled', null, null);
+            // 记录买单被交易所撤销的时间和连续被撤次数
+            if (order.side === 'buy') {
+              this.lastBuyCancelledAt = Date.now();
+              this.consecutivePostOnlyCancels++;
+              logger.info('买单被交易所撤销（post_only）', {
+                consecutivePostOnlyCancels: this.consecutivePostOnlyCancels,
+                orderId: order.orderId,
+                price: order.price,
+              });
+            }
+            logger.info('订单被交易所撤销', {
+              orderId: order.orderId,
+              side: order.side,
+              state: detail.state,
+              filledQty: detail.filledQty,
+            });
+          }
+        } catch (error) {
+          logger.warn('查询订单详情失败，跳过本轮', {
+            orderId: order.orderId,
+            error: String(error),
+          });
+        }
+      }
 
       // 处理买单成交 → 挂卖单
       for (const buyOrder of filledBuyOrders) {
@@ -449,6 +677,17 @@ export class ScalpingStrategyEngine {
       // 定期清理历史订单
       this.tracker.cleanup();
 
+      // 同步未实现盈亏和权益
+      try {
+        const { equity, unrealizedPL } = await this.accountService.getAccountEquity(
+          config.marginCoin || 'USDT'
+        );
+        this.unrealizedPnl = unrealizedPL;
+        this.riskController!.updateEquity(parseFloat(equity));
+      } catch (error) {
+        logger.debug('同步权益失败', { error: String(error) });
+      }
+
       this.consecutiveErrors = 0;
     } catch (error) {
       this.handleLoopError('Loop B', error);
@@ -457,70 +696,158 @@ export class ScalpingStrategyEngine {
     this.scheduleLoopB();
   }
 
-  /**
-   * 买单成交后挂卖单
-   */
   private async handleBuyFilled(buyOrder: TrackedOrder, config: ScalpingStrategyConfig): Promise<void> {
     const buyPrice = parseFloat(buyOrder.price);
     const sellPrice = (buyPrice + parseFloat(config.priceSpread)).toFixed(config.pricePrecision);
 
-    const clientOid = `scalp_${config.symbol}_${config.direction}_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 3-5 秒）
+    await this.sleep(3000);
 
-    try {
-      const result = await this.orderService.placeOrder({
-        symbol: config.symbol,
-        productType: config.productType,
-        marginMode: config.marginMode,
-        marginCoin: config.marginCoin,
-        size: buyOrder.size,
-        side: 'sell',
-        orderType: 'limit',
-        price: sellPrice,
-        force: 'post_only',
-        tradeSide: 'close',
-        clientOid,
-      });
+    // 重试策略：
+    // 合约模式下：tradeSide 跟随 holdMode（默认 double_hold → 'close'）
+    // Attempts 1-5: 使用 tradeSide:'close'（双向持仓模式），递增等待
+    // Attempt 6: 反转策略 — 万一持仓模式检测有误
+    // Attempt 7: 使用 market 单强制平仓
+    const maxRetries = 7;
+    const retryDelays = [2000, 3000, 4000, 5000, 5000, 3000]; // attempt 1..6 失败后的等待时间
 
-      this.tracker.addOrder({
-        orderId: result.orderId,
-        clientOid,
-        side: 'sell',
-        price: sellPrice,
-        size: buyOrder.size,
-        status: 'pending',
-        linkedOrderId: buyOrder.orderId,
-        direction: config.direction,
-        createdAt: Date.now(),
-        filledAt: null,
-      });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const clientOid = `scalp_${config.symbol}_${config.direction}_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-      this.tracker.linkOrders(buyOrder.orderId, result.orderId);
-      this.emitEvent('SELL_ORDER_PLACED', {
-        orderId: result.orderId,
-        buyOrderId: buyOrder.orderId,
-        buyPrice: buyOrder.price,
-        sellPrice,
-        size: buyOrder.size,
-      });
+      // 确定 tradeSide
+      let sellTradeSide: 'open' | 'close' | undefined;
+      let useForce: string = 'post_only';
+      if (config.tradingType === 'futures') {
+        if (attempt <= maxRetries - 2) {
+          // 前 N-2 次：按检测到的持仓模式
+          sellTradeSide = this.holdMode === 'single_hold' ? undefined : 'close';
+        } else if (attempt === maxRetries - 1) {
+          // 倒数第二次：反转策略（万一检测有误）
+          sellTradeSide = this.holdMode === 'single_hold' ? 'close' : undefined;
+        } else {
+          // 最后一次：用 market 单 + close 强制平仓
+          sellTradeSide = 'close';
+          useForce = 'normal';
+        }
+      }
 
-      logger.info('买单成交，已挂卖单', {
-        buyOrderId: buyOrder.orderId,
-        buyPrice: buyOrder.price,
-        sellOrderId: result.orderId,
-        sellPrice,
-      });
-    } catch (error) {
-      logger.error('挂卖单失败', { error: String(error), buyOrderId: buyOrder.orderId });
+      try {
+        const result = await this.orderService.placeOrder({
+          symbol: config.symbol,
+          size: buyOrder.size,
+          side: 'sell',
+          orderType: attempt === maxRetries ? 'market' : 'limit',
+          price: attempt === maxRetries ? undefined : sellPrice,
+          force: useForce,
+          tradeSide: sellTradeSide,
+          clientOid,
+        });
+
+        const sellTracked: TrackedOrder = {
+          orderId: result.orderId,
+          clientOid,
+          side: 'sell',
+          price: sellPrice,
+          size: buyOrder.size,
+          status: 'pending',
+          linkedOrderId: buyOrder.orderId,
+          direction: config.direction || 'long',
+          createdAt: Date.now(),
+          filledAt: null,
+        };
+        this.tracker.addOrder(sellTracked);
+        this.persistenceService.persistNewOrder(sellTracked, config.symbol, config.productType || '', config.marginCoin || 'USDT');
+
+        this.tracker.linkOrders(buyOrder.orderId, result.orderId);
+        this.emitEvent('SELL_ORDER_PLACED', {
+          orderId: result.orderId,
+          buyOrderId: buyOrder.orderId,
+          buyPrice: buyOrder.price,
+          sellPrice,
+          size: buyOrder.size,
+          attempt,
+          usedTradeSide: sellTradeSide,
+          orderType: attempt === maxRetries ? 'market' : 'limit',
+        });
+
+        logger.info('买单成交，已挂卖单', {
+          buyOrderId: buyOrder.orderId,
+          buyPrice: buyOrder.price,
+          sellOrderId: result.orderId,
+          sellPrice,
+          attempt,
+          holdMode: this.holdMode,
+          tradeSide: sellTradeSide,
+        });
+        return;
+      } catch (error) {
+        const errMsg = String(error);
+        // 检查 AppError.details 中的 Bitget 错误码（String(error) 不包含 details）
+        const bitgetCode = this.extractBitgetCode(error);
+        const isPositionError =
+          errMsg.includes('22002') ||
+          errMsg.includes('仓位') ||
+          bitgetCode === '22002';
+        const isModeError =
+          errMsg.includes('40774') ||
+          bitgetCode === '40774';
+
+        if ((isPositionError || isModeError) && attempt < maxRetries) {
+          const delay = retryDelays[attempt - 1] || 5000;
+          logger.warn('挂卖单失败，等待重试', {
+            buyOrderId: buyOrder.orderId,
+            attempt,
+            maxRetries,
+            nextDelayMs: delay,
+            error: errMsg,
+            bitgetCode,
+            holdMode: this.holdMode,
+            usedTradeSide: sellTradeSide,
+            isPositionError,
+            isModeError,
+          });
+          await this.sleep(delay);
+          continue;
+        }
+
+        logger.error('挂卖单最终失败', {
+          error: errMsg,
+          buyOrderId: buyOrder.orderId,
+          attempt,
+          bitgetCode,
+          holdMode: this.holdMode,
+        });
+        this.emitEvent('SELL_ORDER_FAILED', {
+          buyOrderId: buyOrder.orderId,
+          buyPrice: buyOrder.price,
+          sellPrice,
+          error: errMsg,
+          attempts: attempt,
+        });
+        return;
+      }
     }
   }
 
   /**
-   * 卖单成交，计算 PnL
+   * 从 AppError 中提取 Bitget 错误码
    */
+  private extractBitgetCode(error: unknown): string {
+    if (error instanceof AppError && error.details) {
+      const details = error.details as Record<string, unknown>;
+      const data = details.data as Record<string, unknown> | undefined;
+      return data?.code ? String(data.code) : '';
+    }
+    return '';
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private handleSellFilled(sellOrder: TrackedOrder): void {
     this.tradeCount++;
 
-    // 查找对应的买单
     const buyOrder = sellOrder.linkedOrderId
       ? this.tracker.getOrder(sellOrder.linkedOrderId)
       : null;
@@ -531,7 +858,6 @@ export class ScalpingStrategyEngine {
       const size = parseFloat(sellOrder.size);
       const pnl = (sellPrice - buyPrice) * size;
 
-      // 扣除双边手续费
       const fee = StrategyConfigManager.estimateFeeUsdt(
         (sellPrice * size).toFixed(2)
       ) * 2;
@@ -539,6 +865,7 @@ export class ScalpingStrategyEngine {
 
       this.realizedPnl += netPnl;
       this.riskController?.recordPnl(netPnl);
+      this.persistenceService.persistRealizedPnl(netPnl, fee, netPnl > 0);
 
       this.emitEvent('SELL_ORDER_FILLED', {
         sellOrderId: sellOrder.orderId,
@@ -570,20 +897,81 @@ export class ScalpingStrategyEngine {
   // 辅助方法
   // ============================================================
 
-  /**
-   * 根据 USDT 金额和当前价格计算下单数量
-   */
+  private checkFeeCoverage(config: ScalpingStrategyConfig, spec: ContractSpecInfo): void {
+    const spread = parseFloat(config.priceSpread);
+    // 买单 post_only = maker fee, 卖单可能成交为 taker
+    const totalFeeRate = spec.makerFeeRate + spec.takerFeeRate;
+
+    const breakevenPrice = spread / totalFeeRate;
+    const suggestSpread = (price: number) =>
+      (price * totalFeeRate * 1.5).toFixed(1);
+
+    logger.info('手续费覆盖分析', {
+      priceSpread: config.priceSpread,
+      makerFeeRate: `${(spec.makerFeeRate * 100).toFixed(4)}%`,
+      takerFeeRate: `${(spec.takerFeeRate * 100).toFixed(4)}%`,
+      totalFeeRate: `${(totalFeeRate * 100).toFixed(4)}%`,
+      breakevenPrice: breakevenPrice.toFixed(0),
+      suggestedSpreadForBTC: suggestSpread(70000),
+      suggestedSpreadForETH: suggestSpread(3000),
+    });
+
+    if (breakevenPrice < 200000) {
+      const estPrice = 70000;
+      const orderAmount = parseFloat(config.orderAmountUsdt);
+      const size = orderAmount / estPrice;
+      const profit = size * spread;
+      const fee = orderAmount * totalFeeRate;
+      const netLoss = fee - profit;
+
+      if (netLoss > 0) {
+        logger.warn(
+          `priceSpread=${config.priceSpread} 无法覆盖手续费！` +
+          ` BTC ~${estPrice}: 每笔利润 ${profit.toFixed(6)} < 手续费 ${fee.toFixed(6)}，净亏 ${netLoss.toFixed(6)} USDT。` +
+          ` 建议: priceSpread >= ${suggestSpread(estPrice)} 或换低价币种`,
+          {
+            breakevenPrice: breakevenPrice.toFixed(0),
+            currentSpread: config.priceSpread,
+            suggestedSpread: suggestSpread(estPrice),
+            estimatedLossPerTrade: netLoss.toFixed(6),
+          }
+        );
+      }
+    }
+  }
+
   private calculateSize(amountUsdt: string, price: string, precision: number): string {
     const amount = parseFloat(amountUsdt);
     const priceNum = parseFloat(price);
-    if (priceNum <= 0) return '0';
+    if (priceNum <= 0) return '';
     const size = amount / priceNum;
-    return size.toFixed(precision);
+    const minSize = Math.pow(10, -precision);
+    if (size < minSize) {
+      logger.warn('计算数量不足最小精度', {
+        amountUsdt,
+        price,
+        calculatedSize: size,
+        minSize,
+        precision,
+        minRequiredUsdt: (minSize * priceNum).toFixed(2),
+      });
+      return '';
+    }
+    const result = parseFloat(size.toFixed(precision));
+
+    if (this.contractSpec && result < this.contractSpec.minTradeNum) {
+      logger.warn('计算数量不足交易所最小下单量', {
+        amountUsdt,
+        price,
+        calculatedSize: result,
+        minTradeNum: this.contractSpec.minTradeNum,
+      });
+      return '';
+    }
+
+    return result.toString();
   }
 
-  /**
-   * 处理循环错误
-   */
   private handleLoopError(loopName: string, error: unknown): void {
     this.consecutiveErrors++;
     logger.error(`${loopName} 错误 (${this.consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})`, {
@@ -601,7 +989,6 @@ export class ScalpingStrategyEngine {
         consecutiveErrors: this.consecutiveErrors,
       });
 
-      // 冷却后自动恢复
       setTimeout(() => {
         if (this.status === 'ERROR') {
           logger.info('尝试从 ERROR 状态恢复');
@@ -614,9 +1001,6 @@ export class ScalpingStrategyEngine {
     }
   }
 
-  /**
-   * 发布事件
-   */
   private emitEvent(type: StrategyEventType, data: Record<string, unknown>): void {
     const event: StrategyEvent = {
       type,
@@ -625,7 +1009,6 @@ export class ScalpingStrategyEngine {
     };
     this.events.push(event);
 
-    // 清理旧事件
     if (this.events.length > this.maxEvents) {
       this.events = this.events.slice(-this.maxEvents);
     }

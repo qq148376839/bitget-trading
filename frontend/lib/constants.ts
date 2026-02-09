@@ -1,4 +1,4 @@
-import type { StrategyStatus, StrategyEventType } from './types';
+import type { StrategyStatus, StrategyEventType, StrategyType, TradingType } from './types';
 
 export const POLL_INTERVAL_MS = 2000;
 export const ORDERS_POLL_INTERVAL_MS = 3000;
@@ -30,10 +30,14 @@ export const EVENT_CONFIG: Record<StrategyEventType, { label: string; color: str
   BUY_ORDER_FILLED: { label: '买单成交', color: 'cyan' },
   SELL_ORDER_PLACED: { label: '卖单挂出', color: 'purple' },
   SELL_ORDER_FILLED: { label: '卖单成交', color: 'green' },
+  SELL_ORDER_FAILED: { label: '卖单失败', color: 'red' },
   ORDERS_MERGED: { label: '订单合并', color: 'orange' },
   RISK_LIMIT_HIT: { label: '风控触发', color: 'red' },
   CONFIG_UPDATED: { label: '配置更新', color: 'blue' },
   EMERGENCY_STOP: { label: '紧急停止', color: 'red' },
+  GRID_BUY_FILLED: { label: '网格买入', color: 'cyan' },
+  GRID_SELL_FILLED: { label: '网格卖出', color: 'green' },
+  GRID_LEVEL_UPDATED: { label: '网格更新', color: 'blue' },
 };
 
 export const DIRECTION_LABELS: Record<string, string> = {
@@ -52,4 +56,14 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   filled: '已成交',
   cancelled: '已撤销',
   failed: '失败',
+};
+
+export const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
+  scalping: '剥头皮',
+  grid: '网格策略',
+};
+
+export const TRADING_TYPE_LABELS: Record<TradingType, string> = {
+  futures: '合约',
+  spot: '现货',
 };

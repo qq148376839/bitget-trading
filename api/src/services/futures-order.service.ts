@@ -13,6 +13,7 @@ import {
   FuturesBatchCancelParams,
   FuturesBatchCancelResult,
   FuturesPendingOrder,
+  FuturesOrderDetail,
   ProductType,
 } from '../types/futures.types';
 
@@ -29,6 +30,16 @@ export class FuturesOrderService {
    * 合约下单
    */
   async placeOrder(params: FuturesPlaceOrderParams): Promise<FuturesPlaceOrderResult> {
+    const sizeNum = parseFloat(params.size);
+    if (!params.size || isNaN(sizeNum) || sizeNum <= 0) {
+      throw new AppError(
+        ErrorCode.ORDER_INVALID_PARAMS,
+        `下单数量无效: size=${params.size}，请检查 orderAmountUsdt 和 sizePrecision 配置`,
+        { size: params.size },
+        400
+      );
+    }
+
     logger.info('合约下单', {
       symbol: params.symbol,
       side: params.side,
@@ -36,6 +47,8 @@ export class FuturesOrderService {
       price: params.price,
       size: params.size,
       force: params.force,
+      tradeSide: (params as unknown as Record<string, unknown>).tradeSide,
+      requestBody: JSON.stringify(params),
     });
 
     try {
@@ -132,5 +145,20 @@ export class FuturesOrderService {
       { symbol, productType }
     );
     return response.data.entrustedList || [];
+  }
+
+  /**
+   * 查询订单详情（用于确认订单真实状态：filled / cancelled）
+   */
+  async getOrderDetail(
+    symbol: string,
+    productType: ProductType,
+    orderId: string
+  ): Promise<FuturesOrderDetail> {
+    const response = await this.client.get<FuturesOrderDetail>(
+      '/api/v2/mix/order/detail',
+      { symbol, productType, orderId }
+    );
+    return response.data;
   }
 }

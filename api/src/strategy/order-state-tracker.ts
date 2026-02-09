@@ -14,6 +14,11 @@ export interface ReconcileResult {
   cancelledOrders: TrackedOrder[];
 }
 
+/** 对账时发现从交易所消失的订单（需进一步确认状态） */
+export interface DisappearedOrder {
+  order: TrackedOrder;
+}
+
 export class OrderStateTracker {
   private orders: Map<string, TrackedOrder> = new Map();
   private activeBuyOrderId: string | null = null;
@@ -105,43 +110,62 @@ export class OrderStateTracker {
   }
 
   /**
-   * 对账：对比交易所挂单与本地状态，发现已成交订单
-   *
-   * 逻辑：本地标记为 pending 但不在交易所挂单列表中的，视为已成交
+   * 对账第一步：找出从交易所消失的订单（不立即判定状态）
    */
-  reconcile(exchangePendingIds: Set<string>): ReconcileResult {
-    const filledBuyOrders: TrackedOrder[] = [];
-    const filledSellOrders: TrackedOrder[] = [];
-    const cancelledOrders: TrackedOrder[] = [];
+  findDisappearedOrders(exchangePendingIds: Set<string>): DisappearedOrder[] {
+    const disappeared: DisappearedOrder[] = [];
 
     for (const order of this.orders.values()) {
       if (order.status !== 'pending') continue;
 
       if (!exchangePendingIds.has(order.orderId)) {
-        // 本地 pending 但交易所无此单 → 已成交或已撤单
-        // 策略中只有我们自己撤单，如果我们没撤，则视为成交
-        order.status = 'filled';
-        order.filledAt = Date.now();
-
-        if (order.side === 'buy') {
-          filledBuyOrders.push(order);
-          if (this.activeBuyOrderId === order.orderId) {
-            this.activeBuyOrderId = null;
-          }
-        } else {
-          filledSellOrders.push(order);
-        }
-
-        logger.info('发现成交订单', {
-          orderId: order.orderId,
-          side: order.side,
-          price: order.price,
-          size: order.size,
-        });
+        disappeared.push({ order });
       }
     }
 
-    return { filledBuyOrders, filledSellOrders, cancelledOrders };
+    return disappeared;
+  }
+
+  /**
+   * 对账第二步：根据已确认的状态标记订单
+   */
+  confirmFilled(orderId: string): TrackedOrder | null {
+    const order = this.orders.get(orderId);
+    if (!order || order.status !== 'pending') return null;
+
+    order.status = 'filled';
+    order.filledAt = Date.now();
+
+    if (order.side === 'buy' && this.activeBuyOrderId === orderId) {
+      this.activeBuyOrderId = null;
+    }
+
+    logger.info('确认成交订单', {
+      orderId: order.orderId,
+      side: order.side,
+      price: order.price,
+      size: order.size,
+    });
+
+    return order;
+  }
+
+  /**
+   * 标记订单为交易所自动撤销（如 post_only 被拒）
+   */
+  markExchangeCancelled(orderId: string): void {
+    const order = this.orders.get(orderId);
+    if (order && order.status === 'pending') {
+      order.status = 'cancelled';
+      if (this.activeBuyOrderId === orderId) {
+        this.activeBuyOrderId = null;
+      }
+      logger.info('订单被交易所撤销', {
+        orderId: order.orderId,
+        side: order.side,
+        price: order.price,
+      });
+    }
   }
 
   /**

@@ -3,7 +3,7 @@
  * 管理回撤、止损、日亏限制、冷却机制
  */
 
-import { ScalpingStrategyConfig } from '../types/strategy.types';
+import { BaseStrategyConfig } from '../types/strategy.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('risk-controller');
@@ -14,7 +14,7 @@ export interface RiskCheckResult {
 }
 
 export class RiskController {
-  private config: ScalpingStrategyConfig;
+  private config: BaseStrategyConfig;
 
   // PnL 追踪
   private dailyPnl = 0;
@@ -32,7 +32,7 @@ export class RiskController {
   private totalWin = 0;
   private totalLoss = 0;
 
-  constructor(config: ScalpingStrategyConfig, initialEquity: number) {
+  constructor(config: BaseStrategyConfig, initialEquity: number) {
     this.config = config;
     this.peakEquity = initialEquity;
     this.currentEquity = initialEquity;
@@ -42,7 +42,7 @@ export class RiskController {
   /**
    * 更新配置（热更新时调用）
    */
-  updateConfig(config: ScalpingStrategyConfig): void {
+  updateConfig(config: BaseStrategyConfig): void {
     this.config = config;
   }
 

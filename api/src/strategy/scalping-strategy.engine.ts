@@ -85,6 +85,7 @@ export class ScalpingStrategyEngine implements IStrategy {
   private lastBuyCancelledAt = 0; // 上次买单被交易所撤销的时间（用于防止 post_only 快速循环）
   private holdMode: HoldMode = 'double_hold'; // 持仓模式：single_hold=单向, double_hold=双向（默认双向更安全）
   private consecutivePostOnlyCancels = 0; // 连续 post_only 被撤次数（用于自适应调整）
+  private loopCounter = 0; // 心跳计数器
 
   constructor(services: TradingServices, instanceId = 'default') {
     this.orderService = services.orderService;
@@ -450,11 +451,24 @@ export class ScalpingStrategyEngine implements IStrategy {
         const orderPrice = parseFloat(activeBuy.price);
         const orderAge = Date.now() - activeBuy.createdAt;
 
-        const MIN_ORDER_LIFETIME_MS = 3000;
-        const overpaying = orderPrice > bid1Num + spread * 2;
-        const tooFarBelowBid = bid1Num - orderPrice > spread * 5;
+        const MIN_ORDER_LIFETIME_MS = 5000;
+        // 挂单刷新阈值：跟 tick 偏移挂钩而非 priceSpread
+        // tickSize * adaptiveOffset * 3 ≈ 几美元级别，确保紧跟盘口
+        const tickSize = Math.pow(10, -config.pricePrecision);
+        const adaptiveOffset = Math.min(2 + this.consecutivePostOnlyCancels, 10);
+        const refreshThreshold = Math.max(tickSize * adaptiveOffset * 3, spread * 0.1);
+        const overpaying = orderPrice > bid1Num + refreshThreshold;
+        const tooFarBelowBid = bid1Num - orderPrice > refreshThreshold;
 
         if (orderAge >= MIN_ORDER_LIFETIME_MS && (overpaying || tooFarBelowBid)) {
+          logger.info('刷新买单（价格偏离）', {
+            orderId: activeBuy.orderId,
+            orderPrice: activeBuy.price,
+            bid1,
+            priceDiff: (bid1Num - orderPrice).toFixed(1),
+            refreshThreshold: refreshThreshold.toFixed(1),
+            reason: overpaying ? 'overpaying' : 'too_far_below_bid',
+          });
           try {
             await this.orderService.cancelOrder({
               symbol: config.symbol,
@@ -472,6 +486,19 @@ export class ScalpingStrategyEngine implements IStrategy {
             logger.debug('撤旧买单失败（可能已成交或已撤销）', { orderId: activeBuy.orderId });
           }
           await this.placeBuyOrder(bid1, config);
+        } else {
+          // 每 30 轮打印一次心跳日志（约 15 秒），确认策略在运行
+          this.loopCounter++;
+          if (this.loopCounter % 30 === 0) {
+            logger.info('等待买单成交中', {
+              orderId: activeBuy.orderId,
+              orderPrice: activeBuy.price,
+              bid1,
+              priceDiff: (bid1Num - orderPrice).toFixed(1),
+              orderAge: `${(orderAge / 1000).toFixed(0)}s`,
+              refreshThreshold: refreshThreshold.toFixed(1),
+            });
+          }
         }
       } else {
         // 防止 post_only 被交易所撤销后立即重新下单造成快速循环

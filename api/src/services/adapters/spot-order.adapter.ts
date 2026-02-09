@@ -30,13 +30,17 @@ export class SpotOrderAdapter implements IOrderService {
 
   async placeOrder(params: UnifiedPlaceOrderParams): Promise<UnifiedPlaceOrderResult> {
     // 现货忽略 tradeSide, marginMode, marginCoin 等合约参数
+    // 合约 API 用 'normal' 表示 GTC，但现货 API 用 'gtc'，需要映射
+    let spotForce = params.force || 'gtc';
+    if (spotForce === 'normal') spotForce = 'gtc';
+
     return this.service.placeOrder({
       symbol: params.symbol,
       side: params.side,
       orderType: params.orderType,
       size: params.size,
       price: params.price,
-      force: (params.force || 'gtc') as 'gtc' | 'post_only' | 'fok' | 'ioc',
+      force: spotForce as 'gtc' | 'post_only' | 'fok' | 'ioc',
       clientOid: params.clientOid,
     });
   }

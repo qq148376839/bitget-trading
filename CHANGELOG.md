@@ -1,5 +1,22 @@
 # 更新日志
 
+## 2026-02-09
+### 模拟盘适配 + 账户余额修复
+**fix**: 修复模拟盘 API 调用和账户余额显示问题
+**实现内容**:
+1. 模拟盘 API 适配
+   - Bitget 客户端支持模拟盘请求头 `paptrading: 1`
+   - 新增 `BITGET_SIMULATED` 环境变量控制模拟盘/实盘切换
+   - 修正默认 `productType` 从 `SUSDT-FUTURES` 改为 `USDT-FUTURES`（模拟盘通过请求头区分）
+2. 账户余额分类展示
+   - 策略状态 API 并行获取现货 + 合约余额
+   - 现货余额调用 `GET /api/v2/spot/account/assets`
+   - 合约余额调用 `GET /api/v2/mix/account/accounts`
+   - 新增 `GET /api/account/all-balances` 调试端点
+3. 前端仪表盘改版
+   - 新增「现货余额」「合约余额」独立卡片
+   - 8 个指标卡片重新布局
+
 ## 2026-02-08
 ### 前端策略面板 + Docker 部署
 **feat**: 新增 Next.js 14 策略仪表盘前端和 Docker Compose 部署

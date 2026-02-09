@@ -8,7 +8,9 @@ import {
   SwapOutlined,
   OrderedListOutlined,
   WalletOutlined,
+  DollarOutlined,
   TrophyOutlined,
+  FundOutlined,
 } from '@ant-design/icons';
 import { useStrategyStatus } from '@/hooks/useStrategyStatus';
 import { usePnl } from '@/hooks/usePnl';
@@ -21,7 +23,29 @@ export default function MetricsCards() {
   const dailyPnl = parseFloat(pnl?.dailyPnl || '0');
 
   return (
-    <Row gutter={[16, 16]}>
+    <Row gutter={[12, 12]}>
+      <Col span={3}>
+        <Card size="small">
+          <Statistic
+            title="现货余额"
+            value={status?.spotAvailableUsdt || '0'}
+            precision={2}
+            prefix={<DollarOutlined />}
+            suffix="USDT"
+          />
+        </Card>
+      </Col>
+      <Col span={3}>
+        <Card size="small">
+          <Statistic
+            title="合约余额"
+            value={status?.futuresAvailableUsdt || '0'}
+            precision={2}
+            prefix={<FundOutlined />}
+            suffix="USDT"
+          />
+        </Card>
+      </Col>
       <Col span={4}>
         <Card size="small">
           <Statistic
@@ -46,7 +70,7 @@ export default function MetricsCards() {
           />
         </Card>
       </Col>
-      <Col span={4}>
+      <Col span={3}>
         <Card size="small">
           <Statistic
             title="交易次数"
@@ -55,16 +79,7 @@ export default function MetricsCards() {
           />
         </Card>
       </Col>
-      <Col span={4}>
-        <Card size="small">
-          <Statistic
-            title="挂卖单数"
-            value={status?.pendingSellCount || 0}
-            prefix={<OrderedListOutlined />}
-          />
-        </Card>
-      </Col>
-      <Col span={4}>
+      <Col span={3}>
         <Card size="small">
           <Statistic
             title="持仓 USDT"
@@ -74,7 +89,16 @@ export default function MetricsCards() {
           />
         </Card>
       </Col>
-      <Col span={4}>
+      <Col span={2}>
+        <Card size="small">
+          <Statistic
+            title="挂卖单数"
+            value={status?.pendingSellCount || 0}
+            prefix={<OrderedListOutlined />}
+          />
+        </Card>
+      </Col>
+      <Col span={2}>
         <Card size="small">
           <Statistic
             title="胜率"

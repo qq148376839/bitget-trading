@@ -66,6 +66,8 @@ export interface StrategyState {
   lastBidPrice: string | null;
   pendingSellCount: number;
   totalPositionUsdt: string;
+  spotAvailableUsdt: string;
+  futuresAvailableUsdt: string;
   realizedPnl: string;
   unrealizedPnl: string;
   dailyPnl: string;

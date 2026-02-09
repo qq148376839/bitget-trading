@@ -72,6 +72,8 @@ export interface StrategyState {
   lastBidPrice: string | null;
   pendingSellCount: number;
   totalPositionUsdt: string;
+  spotAvailableUsdt: string;
+  futuresAvailableUsdt: string;
   realizedPnl: string;
   unrealizedPnl: string;
   dailyPnl: string;
@@ -120,7 +122,7 @@ export interface PnlSummary {
 /** 默认配置 */
 export const DEFAULT_SCALPING_CONFIG: ScalpingStrategyConfig = {
   symbol: 'BTCUSDT',
-  productType: 'SUSDT-FUTURES',
+  productType: 'USDT-FUTURES',
   direction: 'long',
   orderAmountUsdt: '10',
   priceSpread: '2',

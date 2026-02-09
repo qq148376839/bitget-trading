@@ -31,10 +31,16 @@ docs/                 → 项目文档
 - 基础 URL：https://api.bitget.com
 - 认证方式：APIKey + SecretKey + Passphrase
 - 请求头：ACCESS-KEY, ACCESS-SIGN, ACCESS-PASSPHRASE, ACCESS-TIMESTAMP
+- 模拟盘：请求头添加 `paptrading: 1`，通过 `BITGET_SIMULATED=1` 环境变量控制
 - 签名算法：HMAC-SHA256（timestamp + method + requestPath + body）
 - API 限频：现货交易 10 次/秒/UID，行情查询 20 次/秒/IP
+- 模拟盘注意事项：
+  - productType 统一使用 `USDT-FUTURES`（非 `SUSDT-FUTURES`）
+  - 模拟盘/实盘区分仅通过 `paptrading` 请求头
+  - 部分统一接口（如 `/api/v2/account/all-account-balance`）模拟盘不支持
 - 常用端点：
-  - `GET /api/v2/spot/account/assets` → 账户资产
+  - `GET /api/v2/spot/account/assets` → 现货账户资产
+  - `GET /api/v2/mix/account/accounts` → 合约账户资产（需 productType 参数）
   - `POST /api/v2/spot/trade/place-order` → 现货下单
   - `POST /api/v2/spot/trade/cancel-order` → 撤单
   - `GET /api/v2/spot/trade/orderInfo` → 订单详情

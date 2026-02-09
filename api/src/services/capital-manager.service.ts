@@ -17,6 +17,11 @@ export interface AccountAsset {
   uTime: string;
 }
 
+export interface AllAccountBalance {
+  accountType: string;
+  usdtBalance: string;
+}
+
 export class CapitalManagerService {
   private client: BitgetClientService;
 
@@ -62,5 +67,16 @@ export class CapitalManagerService {
   ): Promise<boolean> {
     const available = await this.getAvailableBalance(coin);
     return Number(available) >= Number(requiredAmount);
+  }
+
+  /**
+   * 获取所有账户类型的 USDT 余额
+   * GET /api/v2/account/all-account-balance
+   */
+  async getAllAccountBalances(): Promise<AllAccountBalance[]> {
+    const response = await this.client.get<AllAccountBalance[]>(
+      '/api/v2/account/all-account-balance'
+    );
+    return response.data || [];
   }
 }

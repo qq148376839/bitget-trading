@@ -250,6 +250,8 @@ export class ScalpingStrategyEngine {
       lastBidPrice: this.lastBidPrice,
       pendingSellCount: this.tracker.getPendingSellOrders().length,
       totalPositionUsdt: this.tracker.getTotalPositionUsdt(),
+      spotAvailableUsdt: '0',
+      futuresAvailableUsdt: '0',
       realizedPnl: this.realizedPnl.toFixed(4),
       unrealizedPnl: '0', // TODO: 从交易所获取
       dailyPnl: riskStats ? riskStats.dailyPnl.toFixed(4) : '0',

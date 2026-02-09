@@ -5,6 +5,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ScalpingStrategyEngine } from '../strategy/scalping-strategy.engine';
 import { ScalpingStrategyConfig } from '../types/strategy.types';
+import { CapitalManagerService } from '../services/capital-manager.service';
+import { FuturesAccountService } from '../services/futures-account.service';
 
 const router = Router();
 
@@ -52,11 +54,26 @@ router.post('/stop', async (req: Request, res: Response, next: NextFunction) => 
  * GET /api/strategy/status
  * 获取策略状态
  */
-router.get('/status', (req: Request, res: Response) => {
+router.get('/status', async (req: Request, res: Response) => {
   const engine = ScalpingStrategyEngine.getInstance();
+  const state = engine.getState();
+
+  // 并行获取现货余额和合约余额
+  const [spotResult, futuresResult] = await Promise.allSettled([
+    new CapitalManagerService().getAvailableBalance('USDT'),
+    new FuturesAccountService().getAvailableBalance('USDT-FUTURES', 'USDT'),
+  ]);
+
+  if (spotResult.status === 'fulfilled') {
+    state.spotAvailableUsdt = spotResult.value;
+  }
+  if (futuresResult.status === 'fulfilled') {
+    state.futuresAvailableUsdt = futuresResult.value;
+  }
+
   res.json({
     success: true,
-    data: engine.getState(),
+    data: state,
   });
 });
 

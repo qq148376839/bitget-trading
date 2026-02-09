@@ -13,6 +13,7 @@ export interface BitgetConfig {
   secretKey: string;
   passphrase: string;
   baseUrl: string;
+  simulated: boolean;
 }
 
 let cachedConfig: BitgetConfig | null = null;
@@ -28,6 +29,7 @@ export function getBitgetConfig(): BitgetConfig {
   const secretKey = process.env.BITGET_SECRET_KEY;
   const passphrase = process.env.BITGET_PASSPHRASE;
   const baseUrl = process.env.BITGET_API_BASE_URL || 'https://api.bitget.com';
+  const simulated = process.env.BITGET_SIMULATED === '1';
 
   if (!apiKey || !secretKey || !passphrase) {
     const missing: string[] = [];
@@ -39,7 +41,7 @@ export function getBitgetConfig(): BitgetConfig {
     );
   }
 
-  cachedConfig = { apiKey, secretKey, passphrase, baseUrl };
+  cachedConfig = { apiKey, secretKey, passphrase, baseUrl, simulated };
   return cachedConfig;
 }
 

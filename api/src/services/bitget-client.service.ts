@@ -63,7 +63,7 @@ export class BitgetClientService {
     const timestamp = Date.now().toString();
     const signature = this.sign(timestamp, method, requestPath, body);
 
-    return {
+    const headers: Record<string, string> = {
       'ACCESS-KEY': this.config.apiKey,
       'ACCESS-SIGN': signature,
       'ACCESS-TIMESTAMP': timestamp,
@@ -71,6 +71,12 @@ export class BitgetClientService {
       'Content-Type': 'application/json',
       'locale': 'zh-CN',
     };
+
+    if (this.config.simulated) {
+      headers['paptrading'] = '1';
+    }
+
+    return headers;
   }
 
   /**

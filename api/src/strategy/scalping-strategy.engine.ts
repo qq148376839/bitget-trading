@@ -89,7 +89,7 @@ export class ScalpingStrategyEngine implements IStrategy {
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
   private lastBuyCancelledAt = 0; // 上次买单被交易所撤销的时间（用于防止 post_only 快速循环）
-  private holdMode: HoldMode = 'single_hold'; // 持仓模式：single_hold=单向, double_hold=双向（模拟盘默认单向）
+  private holdMode: HoldMode = 'double_hold'; // 持仓模式：single_hold=单向, double_hold=双向
   private consecutivePostOnlyCancels = 0; // 连续 post_only 被撤次数（用于自适应调整）
   private loopCounter = 0; // 心跳计数器
 
@@ -197,10 +197,10 @@ export class ScalpingStrategyEngine implements IStrategy {
           this.holdMode = await accountService.getHoldMode(config.productType);
           logger.info('持仓模式检测', { holdMode: this.holdMode });
         } catch (error) {
-          // getHoldMode 已根据模拟盘/实盘选择默认值，这里是额外的 catch
-          const isSimulated = process.env.BITGET_SIMULATED === '1';
-          this.holdMode = isSimulated ? 'single_hold' : 'double_hold';
-          logger.warn('持仓模式检测失败', { error: String(error), fallback: this.holdMode, isSimulated });
+          // getHoldMode 内部已 catch 并返回默认值，此分支极少执行
+          // 统一默认双向持仓（确保 tradeSide 始终发送，避免 40774 错误）
+          this.holdMode = 'double_hold';
+          logger.warn('持仓模式检测失败，默认双向持仓', { error: String(error), fallback: this.holdMode });
         }
       }
 
@@ -787,8 +787,8 @@ export class ScalpingStrategyEngine implements IStrategy {
     }
     const sellPrice = (buyPrice + parseFloat(effectiveSpread)).toFixed(config.pricePrecision);
 
-    // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 3-5 秒）
-    await this.sleep(3000);
+    // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 5-8 秒）
+    await this.sleep(5000);
 
     // 重试策略：（动态切换持仓模式）
     // Attempts 1-2: 按检测到的 holdMode 尝试
@@ -883,15 +883,19 @@ export class ScalpingStrategyEngine implements IStrategy {
           bitgetCode === '40774';
 
         if ((isPositionError || isModeError) && attempt < maxRetries) {
-          // 动态切换持仓模式：如果连续 2 次同一模式失败，切换到另一模式
-          if (!holdModeSwitched && attempt >= 2) {
+          // 动态切换持仓模式：仅在 40774（持仓模式不匹配）时才切换
+          // 22002（暂无仓位可平）通常是仓位结算延迟，不应切换 holdMode
+          if (!holdModeSwitched && isModeError && attempt >= 2) {
             const oldMode = effectiveHoldMode;
             effectiveHoldMode = effectiveHoldMode === 'single_hold' ? 'double_hold' : 'single_hold';
             holdModeSwitched = true;
             this.holdMode = effectiveHoldMode; // 更新实例级别，影响后续买单
+            if (this.mergeEngine) {
+              this.mergeEngine.updateHoldMode(effectiveHoldMode);
+            }
             logger.info('动态切换持仓模式', { from: oldMode, to: effectiveHoldMode, attempt });
           }
-          const delay = retryDelays[attempt - 1] || 5000;
+          const delay = isPositionError ? 3000 : (retryDelays[attempt - 1] || 5000); // 22002 多等待以便仓位结算
           logger.warn('挂卖单失败，等待重试', {
             buyOrderId: buyOrder.orderId,
             attempt,

@@ -35,10 +35,17 @@ export interface SimpleConfigInput {
   riskLevel: RiskLevel;
 }
 
+const TOKEN_KEY = 'bitget_auth_token';
+
 async function fetchAutoCalc(input: SimpleConfigInput): Promise<AutoCalcResult> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) : null;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
   const res = await fetch('/api/strategy/auto-calc', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(input),
   });
   const json = await res.json();

@@ -882,9 +882,10 @@ export class ScalpingStrategyEngine implements IStrategy {
           errMsg.includes('40774') ||
           bitgetCode === '40774';
 
-        if ((isPositionError || isModeError) && attempt < maxRetries) {
+        if (attempt < maxRetries) {
           // 动态切换持仓模式：仅在 40774（持仓模式不匹配）时才切换
           // 22002（暂无仓位可平）通常是仓位结算延迟，不应切换 holdMode
+          // 502 等网络错误也应重试
           if (!holdModeSwitched && isModeError && attempt >= 2) {
             const oldMode = effectiveHoldMode;
             effectiveHoldMode = effectiveHoldMode === 'single_hold' ? 'double_hold' : 'single_hold';
@@ -895,7 +896,8 @@ export class ScalpingStrategyEngine implements IStrategy {
             }
             logger.info('动态切换持仓模式', { from: oldMode, to: effectiveHoldMode, attempt });
           }
-          const delay = isPositionError ? 3000 : (retryDelays[attempt - 1] || 5000); // 22002 多等待以便仓位结算
+          const isNetworkError = !isPositionError && !isModeError;
+          const delay = isNetworkError ? 3000 : isPositionError ? 3000 : (retryDelays[attempt - 1] || 5000);
           logger.warn('挂卖单失败，等待重试', {
             buyOrderId: buyOrder.orderId,
             attempt,
@@ -907,6 +909,7 @@ export class ScalpingStrategyEngine implements IStrategy {
             usedTradeSide: sellTradeSide,
             isPositionError,
             isModeError,
+            isNetworkError,
           });
           await this.sleep(delay);
           continue;

@@ -1,8 +1,18 @@
 # Build stage
 FROM node:20-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
+
+# 配置 npm 使用淘宝镜像源（解决国内网络问题）
+RUN npm config set registry https://registry.npmmirror.com
+
+# 直接用 npm 安装 pnpm（不用 corepack，避免网络问题）
+RUN npm install -g pnpm@10.28.2
+
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
+
+# 配置 pnpm 使用淘宝镜像源
+RUN pnpm config set registry https://registry.npmmirror.com
+
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm run build

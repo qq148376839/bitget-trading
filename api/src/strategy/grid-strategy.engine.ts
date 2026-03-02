@@ -71,7 +71,7 @@ export class GridStrategyEngine implements IStrategy {
   /** Order tracking map: orderId -> TrackedOrder */
   private trackedOrders: Map<string, TrackedOrder> = new Map();
 
-  private holdMode: HoldMode = 'double_hold';
+  private holdMode: HoldMode = 'single_hold';
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
 
@@ -160,8 +160,9 @@ export class GridStrategyEngine implements IStrategy {
           this.holdMode = await futuresAccountService.getHoldMode(config.productType);
           logger.info('持仓模式检测', { holdMode: this.holdMode });
         } catch (error) {
-          logger.warn('持仓模式检测失败，默认双向持仓', { error: String(error) });
-          this.holdMode = 'double_hold';
+          const isSimulated = process.env.BITGET_SIMULATED === '1';
+          this.holdMode = isSimulated ? 'single_hold' : 'double_hold';
+          logger.warn('持仓模式检测失败', { error: String(error), fallback: this.holdMode });
         }
       }
 

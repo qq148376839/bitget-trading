@@ -31,7 +31,7 @@ export class MergeEngine {
     orderService: IOrderService,
     tracker: OrderStateTracker,
     config: ScalpingStrategyConfig,
-    holdMode: HoldMode = 'double_hold'
+    holdMode: HoldMode = 'single_hold'
   ) {
     this.orderService = orderService;
     this.tracker = tracker;

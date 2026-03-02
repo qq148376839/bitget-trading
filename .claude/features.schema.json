@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Feature Tracking Schema",
+  "description": "Schema for tracking features in the Bitget trading system",
+  "type": "object",
+  "required": ["metadata", "categories", "statusDefinitions", "priorityDefinitions", "testStatusDefinitions"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["project", "version", "lastUpdated"],
+      "properties": {
+        "project": { "type": "string" },
+        "version": { "type": "string" },
+        "lastUpdated": { "type": "string", "format": "date" },
+        "description": { "type": "string" }
+      }
+    },
+    "categories": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "required": ["name", "description", "features"],
+          "properties": {
+            "name": { "type": "string" },
+            "description": { "type": "string" },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "name", "description", "status", "priority", "files", "testStatus"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z]+-[0-9]{3}$",
+                    "description": "Unique feature ID (e.g., core-001)"
+                  },
+                  "name": { "type": "string" },
+                  "description": { "type": "string" },
+                  "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "failed", "blocked"]
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": ["critical", "high", "medium", "low"]
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "testStatus": {
+                    "type": "string",
+                    "enum": ["not_started", "in_progress", "passing", "failing", "needs_update"]
+                  },
+                  "lastModified": { "type": "string", "format": "date" },
+                  "notes": { "type": "string" },
+                  "blockedBy": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Feature IDs that block this feature"
+                  },
+                  "relatedDocs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Related documentation files"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "statusDefinitions": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": { "type": "string" }
+      }
+    },
+    "priorityDefinitions": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": { "type": "string" }
+      }
+    },
+    "testStatusDefinitions": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": { "type": "string" }
+      }
+    }
+  }
+}

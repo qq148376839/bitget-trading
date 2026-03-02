@@ -1,0 +1,60 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:api.bitget.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.bitget.com)",
+      "Bash(git add:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "At the start of each session:\n1. Read the last 20 entries from .claude/claude-progress.txt to understand recent work\n2. Check .claude/features.json for in_progress or failing features\n3. Review git status and recent commits\n\nProvide a brief summary of what was last worked on and what should be the next priority.",
+            "statusMessage": "Reading session context..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Before writing or editing files related to financial operations (capital, fund, balance, order, strategy, account):\n\nCheck if the file path matches any of these patterns:\n- **/capital*.ts\n- **/fund*.ts  \n- **/balance*.ts\n- **/order*.ts\n- **/*strategy*.ts\n- **/account*.ts\n\nIf yes, remind: 'This file affects financial operations. After implementation, trading-validator agent MUST verify this change.'\n\nFile being modified: $ARGUMENTS",
+            "statusMessage": "Checking for financial code patterns..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"[$(date +'%Y-%m-%d %H:%M')] agent | MODIFIED | File: $TOOL_USE_FILE_PATH\" >> .claude/claude-progress.txt 2>/dev/null || true",
+            "statusMessage": "Logging change to progress file...",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Session ending. Check:\n1. Have any code files been modified?\n2. Has .claude/claude-progress.txt been updated with today's work?\n3. Has .claude/features.json been updated if feature status changed?\n4. Should project-summarizer agent be triggered to update documentation?\n\nProvide recommendations for what needs to be done before ending this session.",
+            "statusMessage": "Checking session completion status..."
+          }
+        ]
+      }
+    ]
+  }
+}

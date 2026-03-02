@@ -83,7 +83,7 @@ export class ScalpingStrategyEngine implements IStrategy {
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
   private lastBuyCancelledAt = 0; // 上次买单被交易所撤销的时间（用于防止 post_only 快速循环）
-  private holdMode: HoldMode = 'double_hold'; // 持仓模式：single_hold=单向, double_hold=双向（默认双向更安全）
+  private holdMode: HoldMode = 'single_hold'; // 持仓模式：single_hold=单向, double_hold=双向（模拟盘默认单向）
   private consecutivePostOnlyCancels = 0; // 连续 post_only 被撤次数（用于自适应调整）
   private loopCounter = 0; // 心跳计数器
 
@@ -137,12 +137,20 @@ export class ScalpingStrategyEngine implements IStrategy {
 
     try {
       // 初始化配置：优先使用 overrides，其次 DB 恢复的上次配置
+      // 注意：如果交易类型变更了（如 futures→spot），不要继承旧配置中的合约参数
+      const newTradingType = overrides?.tradingType || this.lastConfig.tradingType;
+      const tradingTypeChanged = this.configLoaded && this.lastConfig.tradingType !== newTradingType;
       const baseOverrides = this.configLoaded
         ? { ...this.lastConfig, ...overrides }
         : overrides;
+      if (tradingTypeChanged && newTradingType === 'spot') {
+        // 切换到现货时清除合约专用参数，避免恢复错误的 pending 订单
+        delete (baseOverrides as Record<string, unknown>).productType;
+        delete (baseOverrides as Record<string, unknown>).marginMode;
+      }
       const configInput = {
         strategyType: 'scalping' as const,
-        tradingType: baseOverrides?.tradingType || this.lastConfig.tradingType,
+        tradingType: newTradingType,
         instanceId: this.instanceId,
         ...baseOverrides,
       };
@@ -183,8 +191,10 @@ export class ScalpingStrategyEngine implements IStrategy {
           this.holdMode = await accountService.getHoldMode(config.productType);
           logger.info('持仓模式检测', { holdMode: this.holdMode });
         } catch (error) {
-          logger.warn('持仓模式检测失败，默认双向持仓', { error: String(error) });
-          this.holdMode = 'double_hold';
+          // getHoldMode 已根据模拟盘/实盘选择默认值，这里是额外的 catch
+          const isSimulated = process.env.BITGET_SIMULATED === '1';
+          this.holdMode = isSimulated ? 'single_hold' : 'double_hold';
+          logger.warn('持仓模式检测失败', { error: String(error), fallback: this.holdMode, isSimulated });
         }
       }
 
@@ -523,16 +533,21 @@ export class ScalpingStrategyEngine implements IStrategy {
   private async placeBuyOrder(bidPrice: string, config: ScalpingStrategyConfig): Promise<void> {
     const tickSize = Math.pow(10, -config.pricePrecision);
 
-    // 自适应价格偏移：连续 post_only 被撤越多，偏移越大
-    // 基础偏移 2 tick，每连续被撤一次多偏移 1 tick，最大 10 tick
-    const baseTickOffset = 2;
-    const adaptiveTickOffset = Math.min(baseTickOffset + this.consecutivePostOnlyCancels, 10);
+    // 现货模式：直接使用 GTC（模拟盘 post_only 不稳定），偏移 1 tick
+    // 合约模式：自适应 post_only，连续被撤越多偏移越大，5 次后降级 GTC
+    let force: string;
+    let adaptiveTickOffset: number;
+    if (config.tradingType === 'spot') {
+      force = 'gtc';
+      adaptiveTickOffset = 1;
+    } else {
+      const baseTickOffset = 2;
+      adaptiveTickOffset = Math.min(baseTickOffset + this.consecutivePostOnlyCancels, 10);
+      const useGtc = this.consecutivePostOnlyCancels >= 5;
+      force = useGtc ? 'gtc' : 'post_only';
+    }
     const adjustedPrice = parseFloat(bidPrice) - tickSize * adaptiveTickOffset;
     const price = adjustedPrice.toFixed(config.pricePrecision);
-
-    // 如果连续被撤超过 5 次，改用 GTC（normal）模式 — 接受 taker 成交
-    const useGtc = this.consecutivePostOnlyCancels >= 5;
-    const force = useGtc ? 'normal' : 'post_only';
 
     // 获取 ask1 用于诊断日志
     let ask1: string | null = null;
@@ -730,13 +745,16 @@ export class ScalpingStrategyEngine implements IStrategy {
     // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 3-5 秒）
     await this.sleep(3000);
 
-    // 重试策略：
-    // 合约模式下：tradeSide 跟随 holdMode（默认 double_hold → 'close'）
-    // Attempts 1-5: 使用 tradeSide:'close'（双向持仓模式），递增等待
-    // Attempt 6: 反转策略 — 万一持仓模式检测有误
-    // Attempt 7: 使用 market 单强制平仓
+    // 重试策略：（动态切换持仓模式）
+    // Attempts 1-2: 按检测到的 holdMode 尝试
+    // Attempt 3: 如果连续 22002/40774，自动切换 holdMode 并重试
+    // Attempts 4-5: 使用切换后的 holdMode
+    // Attempt 6: 反转回原始 holdMode（最后尝试 limit）
+    // Attempt 7: market 单 + 两种 tradeSide 都试
     const maxRetries = 7;
-    const retryDelays = [2000, 3000, 4000, 5000, 5000, 3000]; // attempt 1..6 失败后的等待时间
+    const retryDelays = [2000, 2000, 2000, 3000, 3000, 3000]; // attempt 1..6 失败后的等待时间
+    let effectiveHoldMode = this.holdMode;
+    let holdModeSwitched = false;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const clientOid = `scalp_${config.symbol}_${config.direction}_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -746,15 +764,15 @@ export class ScalpingStrategyEngine implements IStrategy {
       let useForce: string = 'post_only';
       if (config.tradingType === 'futures') {
         if (attempt <= maxRetries - 2) {
-          // 前 N-2 次：按检测到的持仓模式
-          sellTradeSide = this.holdMode === 'single_hold' ? undefined : 'close';
+          // 前 N-2 次：按当前 effectiveHoldMode（可能已动态切换）
+          sellTradeSide = effectiveHoldMode === 'single_hold' ? undefined : 'close';
         } else if (attempt === maxRetries - 1) {
-          // 倒数第二次：反转策略（万一检测有误）
-          sellTradeSide = this.holdMode === 'single_hold' ? 'close' : undefined;
+          // 倒数第二次：反转策略（万一动态切换也不对）
+          sellTradeSide = effectiveHoldMode === 'single_hold' ? 'close' : undefined;
         } else {
-          // 最后一次：用 market 单 + close 强制平仓
-          sellTradeSide = 'close';
-          useForce = 'normal';
+          // 最后一次：用 market 单，无 tradeSide（one-way 兼容）
+          sellTradeSide = undefined;
+          useForce = 'gtc';
         }
       }
 
@@ -820,6 +838,14 @@ export class ScalpingStrategyEngine implements IStrategy {
           bitgetCode === '40774';
 
         if ((isPositionError || isModeError) && attempt < maxRetries) {
+          // 动态切换持仓模式：如果连续 2 次同一模式失败，切换到另一模式
+          if (!holdModeSwitched && attempt >= 2) {
+            const oldMode = effectiveHoldMode;
+            effectiveHoldMode = effectiveHoldMode === 'single_hold' ? 'double_hold' : 'single_hold';
+            holdModeSwitched = true;
+            this.holdMode = effectiveHoldMode; // 更新实例级别，影响后续买单
+            logger.info('动态切换持仓模式', { from: oldMode, to: effectiveHoldMode, attempt });
+          }
           const delay = retryDelays[attempt - 1] || 5000;
           logger.warn('挂卖单失败，等待重试', {
             buyOrderId: buyOrder.orderId,
@@ -828,7 +854,7 @@ export class ScalpingStrategyEngine implements IStrategy {
             nextDelayMs: delay,
             error: errMsg,
             bitgetCode,
-            holdMode: this.holdMode,
+            effectiveHoldMode,
             usedTradeSide: sellTradeSide,
             isPositionError,
             isModeError,

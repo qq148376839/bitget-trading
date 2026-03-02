@@ -30,6 +30,10 @@ export class FuturesOrderAdapter implements IOrderService {
   }
 
   async placeOrder(params: UnifiedPlaceOrderParams): Promise<UnifiedPlaceOrderResult> {
+    // 合约 API v2 使用 'gtc' 表示 GTC，不接受 'normal'
+    let futuresForce = params.force || 'gtc';
+    if (futuresForce === 'normal') futuresForce = 'gtc';
+
     // 构建请求参数，单向持仓模式下 tradeSide 为 undefined 时不传该字段
     const orderParams: Record<string, unknown> = {
       symbol: params.symbol,
@@ -40,7 +44,7 @@ export class FuturesOrderAdapter implements IOrderService {
       side: params.side,
       orderType: params.orderType,
       price: params.price,
-      force: params.force,
+      force: futuresForce,
       clientOid: params.clientOid,
     };
     // 仅在有值时添加 tradeSide（避免发送 tradeSide: undefined/null）

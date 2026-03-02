@@ -1,0 +1,338 @@
+{
+  "$schema": "./features.schema.json",
+  "metadata": {
+    "project": "Bitget 量化交易系统",
+    "version": "2.0",
+    "lastUpdated": "2026-03-02",
+    "description": "Feature tracking for cryptocurrency quantitative trading system"
+  },
+  "categories": {
+    "core": {
+      "name": "核心功能",
+      "description": "基础交易和账户管理功能",
+      "features": [
+        {
+          "id": "core-001",
+          "name": "Bitget API 客户端封装",
+          "description": "支持认证、签名、重试的 REST API 客户端",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/bitget-client.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "core-002",
+          "name": "合约规格三层缓存",
+          "description": "内存 → DB → API 三层缓存机制",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/contract-spec.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "core-003",
+          "name": "现货规格三层缓存",
+          "description": "内存 → DB → API 三层缓存机制",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/spot-spec.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "core-004",
+          "name": "资金管理服务",
+          "description": "资金分配、释放、充足性验证（含手续费预留）",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/capital-manager.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "core-005",
+          "name": "订单执行服务（现货）",
+          "description": "现货下单、撤单、订单查询、状态同步",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/order-execution.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "core-006",
+          "name": "合约订单服务",
+          "description": "合约下单、撤单、批量撤单、挂单查询",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/services/futures-order.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        }
+      ]
+    },
+    "strategy": {
+      "name": "策略引擎",
+      "description": "交易策略实现和管理",
+      "features": [
+        {
+          "id": "strategy-001",
+          "name": "剥头皮策略引擎",
+          "description": "状态机 + 双循环 + post_only 自适应",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/strategy/scalping-strategy.engine.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-002",
+          "name": "网格策略引擎",
+          "description": "等差/等比网格 + 买卖循环",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/strategy/grid-strategy.engine.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-003",
+          "name": "网格位管理器",
+          "description": "网格位状态机 + 订单映射",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/strategy/grid-level-manager.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-004",
+          "name": "策略管理器",
+          "description": "策略创建、注册、生命周期管理（Singleton）",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/strategy/strategy-manager.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-005",
+          "name": "风控模块",
+          "description": "回撤、止损、日亏限制",
+          "status": "completed",
+          "priority": "critical",
+          "files": ["api/src/strategy/risk-controller.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-006",
+          "name": "挂单合并引擎",
+          "description": "同价位挂单合并（加权平均价）",
+          "status": "completed",
+          "priority": "medium",
+          "files": ["api/src/strategy/merge-engine.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "strategy-007",
+          "name": "自动计算服务",
+          "description": "4 参数推导完整策略配置",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/services/auto-calc.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        }
+      ]
+    },
+    "adapters": {
+      "name": "适配器层",
+      "description": "统一接口适配器（合约/现货）",
+      "features": [
+        {
+          "id": "adapter-001",
+          "name": "6 个统一适配器",
+          "description": "订单、行情、账户适配器（合约+现货各3个）",
+          "status": "completed",
+          "priority": "high",
+          "files": [
+            "api/src/services/adapters/futures-order.adapter.ts",
+            "api/src/services/adapters/futures-market-data.adapter.ts",
+            "api/src/services/adapters/futures-account.adapter.ts",
+            "api/src/services/adapters/spot-order.adapter.ts",
+            "api/src/services/adapters/spot-market-data.adapter.ts",
+            "api/src/services/adapters/spot-account.adapter.ts"
+          ],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        }
+      ]
+    },
+    "frontend": {
+      "name": "前端界面",
+      "description": "Next.js 14 Dashboard",
+      "features": [
+        {
+          "id": "frontend-001",
+          "name": "策略创建向导",
+          "description": "4 步向导（交易对 → 策略类型 → 基础参数 → 高级参数）",
+          "status": "completed",
+          "priority": "high",
+          "files": ["frontend/components/strategy-wizard.tsx"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "frontend-002",
+          "name": "实时 PnL 面板",
+          "description": "展示账户盈亏、持仓、订单",
+          "status": "completed",
+          "priority": "high",
+          "files": ["frontend/components/pnl-panel.tsx"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "frontend-003",
+          "name": "8 个 SWR 数据钩子",
+          "description": "状态、PnL、订单、事件、规格、搜索、计算、边界",
+          "status": "completed",
+          "priority": "medium",
+          "files": [
+            "frontend/hooks/use-strategy-status.ts",
+            "frontend/hooks/use-pnl.ts",
+            "frontend/hooks/use-orders.ts",
+            "frontend/hooks/use-events.ts",
+            "frontend/hooks/use-specs.ts",
+            "frontend/hooks/use-symbol-search.ts",
+            "frontend/hooks/use-auto-calc.ts",
+            "frontend/hooks/use-boundaries.ts"
+          ],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        }
+      ]
+    },
+    "infrastructure": {
+      "name": "基础设施",
+      "description": "部署、监控、日志",
+      "features": [
+        {
+          "id": "infra-001",
+          "name": "Docker Compose 部署",
+          "description": "nginx + api + frontend + postgres",
+          "status": "completed",
+          "priority": "high",
+          "files": ["docker-compose.yml", "nginx/nginx.conf"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "infra-002",
+          "name": "数据库迁移系统",
+          "description": "4 个迁移脚本 + 自动执行",
+          "status": "completed",
+          "priority": "critical",
+          "files": [
+            "api/migrations/001_initial_schema.sql",
+            "api/migrations/002_add_indices.sql",
+            "api/migrations/003_strategy_persistence.sql",
+            "api/migrations/004_contract_specs.sql"
+          ],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        },
+        {
+          "id": "infra-003",
+          "name": "日志服务",
+          "description": "级别门控 + 节流 + 聚合模式",
+          "status": "completed",
+          "priority": "high",
+          "files": ["api/src/services/log.service.ts"],
+          "testStatus": "passing",
+          "lastModified": "2026-03-02"
+        }
+      ]
+    },
+    "enhancements": {
+      "name": "待优化功能",
+      "description": "潜在改进和增强",
+      "features": [
+        {
+          "id": "enhance-001",
+          "name": "WebSocket 实时行情推送",
+          "description": "替代轮询，降低延迟",
+          "status": "pending",
+          "priority": "medium",
+          "files": [],
+          "testStatus": "not_started",
+          "notes": "可提升 tick 级别策略的响应速度"
+        },
+        {
+          "id": "enhance-002",
+          "name": "多币种组合策略",
+          "description": "支持跨币种相关性套利",
+          "status": "pending",
+          "priority": "low",
+          "files": [],
+          "testStatus": "not_started",
+          "notes": "需要相关性分析引擎"
+        },
+        {
+          "id": "enhance-003",
+          "name": "回测系统",
+          "description": "历史数据回测策略参数",
+          "status": "pending",
+          "priority": "high",
+          "files": [],
+          "testStatus": "not_started",
+          "notes": "帮助验证策略有效性，减少实盘风险"
+        },
+        {
+          "id": "enhance-004",
+          "name": "告警系统",
+          "description": "异常情况钉钉/邮件/短信通知",
+          "status": "pending",
+          "priority": "high",
+          "files": [],
+          "testStatus": "not_started",
+          "notes": "资金异常、策略异常、API 异常告警"
+        },
+        {
+          "id": "enhance-005",
+          "name": "性能监控面板",
+          "description": "策略执行耗时、API 延迟、DB 查询分析",
+          "status": "pending",
+          "priority": "medium",
+          "files": [],
+          "testStatus": "not_started",
+          "notes": "帮助定位性能瓶颈"
+        }
+      ]
+    }
+  },
+  "statusDefinitions": {
+    "pending": "待开发",
+    "in_progress": "开发中",
+    "completed": "已完成",
+    "failed": "测试失败（需修复）",
+    "blocked": "被阻塞"
+  },
+  "priorityDefinitions": {
+    "critical": "关键功能（资金安全相关）",
+    "high": "高优先级",
+    "medium": "中优先级",
+    "low": "低优先级"
+  },
+  "testStatusDefinitions": {
+    "not_started": "未开始测试",
+    "in_progress": "测试中",
+    "passing": "测试通过",
+    "failing": "测试失败",
+    "needs_update": "需要更新测试"
+  }
+}

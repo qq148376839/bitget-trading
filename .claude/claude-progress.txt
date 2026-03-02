@@ -1,0 +1,22 @@
+# Bitget 量化交易系统 - 开发进度日志
+# 格式：[YYYY-MM-DD HH:MM] <Agent> | <Action> | <Details>
+# 用途：记录每次 agent session 的关键操作，用于快速恢复上下文
+
+[2026-03-02 00:00] system | INIT | 初始化进度追踪文件
+[2026-03-02 00:00] system | CONTEXT | 项目基于 v2.0 架构，支持剥头皮和网格策略
+[2026-03-02 00:00] system | CONTEXT | 数据库迁移已完成（4个迁移脚本）
+[2026-03-02 00:00] system | CONTEXT | 当前分支：main，最新提交：27e73b2 现货force参数映射优化
+
+# 使用说明：
+# - 每次完成一个功能/修复后，在此文件末尾追加一行记录
+# - Agent 每次启动时应读取此文件了解最近进展
+# - 提交代码时应同步更新此文件
+# - 保持简洁，每行不超过 120 字符
+# - 重要的架构变更、API 变更、数据库 schema 变更必须记录
+
+# 示例记录：
+# [2026-03-02 14:30] developer | FEATURE | 新增 MACD 指标计算服务 (api/src/services/indicators/macd.service.ts)
+# [2026-03-02 15:00] tester | TEST | 为 MACD 服务添加单元测试 (api/src/services/indicators/__tests__/macd.service.test.ts)
+# [2026-03-02 15:20] reviewer | REVIEW | 代码审查通过，无安全问题
+# [2026-03-02 15:30] project-summarizer | DOCS | 更新文档 docs/features/260302-MACD指标.md
+# [2026-03-02 15:40] developer | COMMIT | feat: 添加 MACD 指标计算服务 (commit: abc1234)

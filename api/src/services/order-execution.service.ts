@@ -86,6 +86,7 @@ export class OrderExecutionService {
       orderType: params.orderType,
       size: params.size,
       price: params.price,
+      force: params.force,
     });
 
     const response = await this.client.post<PlaceOrderResult>(

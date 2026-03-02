@@ -60,18 +60,14 @@ export class FuturesAccountService {
       // 兼容旧字段格式
       const raw = response.data as unknown as Record<string, string>;
       if (raw?.holdMode === 'double_hold') return 'double_hold';
-      // 模拟盘通常为单向持仓，实盘默认双向持仓
-      const isSimulated = getBitgetConfig().simulated;
-      const fallback: HoldMode = isSimulated ? 'single_hold' : 'double_hold';
-      logger.warn('无法识别持仓模式', { rawData: JSON.stringify(response.data), fallback, isSimulated });
-      return fallback;
+      // 无法识别时默认双向持仓（更安全，确保 tradeSide 始终发送）
+      logger.warn('无法识别持仓模式，默认双向持仓', { rawData: JSON.stringify(response.data) });
+      return 'double_hold';
     } catch (error) {
-      // 模拟盘 position-mode API 返回 404，默认单向持仓
-      // 实盘默认双向持仓（更安全，确保 tradeSide 始终发送）
-      const isSimulated = getBitgetConfig().simulated;
-      const fallback: HoldMode = isSimulated ? 'single_hold' : 'double_hold';
-      logger.warn('持仓模式查询失败', { error: String(error), fallback, isSimulated });
-      return fallback;
+      // 模拟盘 position-mode API 可能返回 404
+      // 统一默认双向持仓（确保 tradeSide 始终发送，避免 40774 错误）
+      logger.warn('持仓模式查询失败，默认双向持仓', { error: String(error) });
+      return 'double_hold';
     }
   }
 

@@ -64,8 +64,15 @@ export class FuturesAccountService {
       logger.warn('无法识别持仓模式，默认双向持仓', { rawData: JSON.stringify(response.data) });
       return 'double_hold';
     } catch (error) {
-      // 模拟盘 position-mode API 可能返回 404
-      // 统一默认双向持仓（确保 tradeSide 始终发送，避免 40774 错误）
+      // 模拟盘 position-mode API 返回 404
+      const { simulated } = getBitgetConfig();
+      if (simulated) {
+        // Bitget 模拟盘默认使用单向持仓（one_way_mode）
+        // 单向持仓不需要 tradeSide 参数，发送 tradeSide:"close" 会导致 22002 错误
+        logger.info('模拟盘持仓模式查询失败，使用单向持仓（模拟盘默认模式）', { error: String(error) });
+        return 'single_hold';
+      }
+      // 实盘查询失败时默认双向持仓（更安全，确保 tradeSide 始终发送，避免 40774 错误）
       logger.warn('持仓模式查询失败，默认双向持仓', { error: String(error) });
       return 'double_hold';
     }

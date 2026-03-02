@@ -42,8 +42,9 @@ router.put('/:key', async (req: Request, res: Response, next: NextFunction) => {
       updatedBy: req.user?.username,
     });
 
-    // If Bitget API credentials changed, clear cached config
-    if (['BITGET_API_KEY', 'BITGET_SECRET_KEY', 'BITGET_PASSPHRASE', 'BITGET_SIMULATED'].includes(key)) {
+    // If Bitget API credentials changed, sync to process.env and clear cached config
+    if (['BITGET_API_KEY', 'BITGET_SECRET_KEY', 'BITGET_PASSPHRASE', 'BITGET_API_BASE_URL', 'BITGET_SIMULATED'].includes(key)) {
+      process.env[key] = value;
       clearBitgetConfig();
       BitgetClientService.clearInstance();
     }

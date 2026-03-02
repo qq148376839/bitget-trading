@@ -76,48 +76,44 @@ export class FuturesAccountService {
   }
 
   /**
-   * 模拟盘持仓模式检测（GET API 不可用时通过 SET API 推断）
-   * 策略：尝试设置 one_way_mode
-   * - 成功 → 使用 single_hold
-   * - 失败 40920（有持仓无法切换）→ 尝试设置 hedge_mode
-   *   - hedge_mode 成功 → 说明之前是 one_way_mode，但现在切回了 hedge → 再设回 one_way
-   *   - hedge_mode 也失败 40920 → 当前已在 hedge_mode → 使用 double_hold
+   * 模拟盘持仓模式检测（GET API 返回 404，通过 SET API 探测）
+   *
+   * 策略：尝试设置 one_way_mode（最多重试 2 次应对 502）
+   * - 成功 → 使用 single_hold（无 tradeSide）
+   * - 失败 40920（有持仓/订单无法切换）→ 使用 double_hold（保守策略，带 tradeSide）
+   * - 网络错误（502 等）→ 默认 double_hold（更安全）
    */
   private async detectSimulatedHoldMode(productType: ProductType): Promise<HoldMode> {
-    // 尝试 1：设置为 one_way_mode
-    try {
-      await this.client.post('/api/v2/mix/account/set-position-mode', {
-        productType,
-        posMode: 'one_way_mode',
-      });
-      logger.info('模拟盘持仓模式已设置为单向持仓（one_way_mode）');
-      return 'single_hold';
-    } catch (setError) {
-      const errMsg = String(setError);
-      // 40920 = 有持仓或订单，无法切换
-      if (!errMsg.includes('40920')) {
-        // 非 40920 错误，默认双向持仓
-        logger.warn('模拟盘设置持仓模式异常，默认双向持仓', { error: errMsg });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.client.post('/api/v2/mix/account/set-position-mode', {
+          productType,
+          posMode: 'one_way_mode',
+        });
+        logger.info('模拟盘持仓模式已设置为单向持仓（one_way_mode）');
+        return 'single_hold';
+      } catch (setError) {
+        const errMsg = String(setError);
+        if (errMsg.includes('40920')) {
+          // 有持仓/订单无法切换 → 当前处于某种模式且有仓位
+          // 保守使用 double_hold（带 tradeSide），因为：
+          // - 如果实际是 hedge_mode，不带 tradeSide 会报 40774
+          // - 如果实际是 one_way_mode，带 tradeSide 时 buy+open 被忽略，sell+close 可能 22002 但重试能恢复
+          logger.info('模拟盘有持仓无法切换模式，使用双向持仓（保守策略）', { attempt });
+          return 'double_hold';
+        }
+        // 502 等网络错误，重试
+        if (attempt < 3) {
+          logger.warn('模拟盘设置持仓模式网络错误，重试', { attempt, error: errMsg });
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        // 重试耗尽，默认双向持仓（更安全）
+        logger.warn('模拟盘持仓模式检测失败，默认双向持仓', { error: errMsg });
         return 'double_hold';
       }
     }
-
-    // 尝试 2：有持仓无法切到 one_way，尝试切到 hedge_mode
-    try {
-      await this.client.post('/api/v2/mix/account/set-position-mode', {
-        productType,
-        posMode: 'hedge_mode',
-      });
-      // 切换成功说明之前在 one_way_mode（但有持仓所以不能切到 one_way）
-      // 实际上这不可能——如果 one_way 有持仓不能切，hedge 也切不了
-      // 但以防万一，成功就说明我们现在在 hedge_mode
-      logger.info('模拟盘持仓模式已切换为双向持仓（hedge_mode）');
-      return 'double_hold';
-    } catch {
-      // hedge_mode 也失败 40920 → 当前已在 hedge_mode，有持仓无法切换
-      logger.info('模拟盘当前为双向持仓（hedge_mode），有持仓无法切换');
-      return 'double_hold';
-    }
+    return 'double_hold';
   }
 
   /**

@@ -101,11 +101,31 @@ docs/                     → 项目文档
 - `presets/risk-presets.ts` → 风险等级预设（conservative/balanced/aggressive + 波动率/再平衡/止损）
 
 ## 部署
-- Docker Compose: nginx(8847) + api(3001) + frontend(3000) + postgres(5432)
+- Docker Compose: app(8847→3001) + postgres(5432)，单容器模式（Express 代理 Next.js）
 - PostgreSQL 数据持久化: pg_data named volume
 - API 启动时自动运行数据库迁移（6 个迁移脚本）
 - 认证：JWT + bcrypt，公开路由: health/auth，其余需 Bearer Token
 - 配置加密：ENCRYPTION_KEY 环境变量用于 AES-256-GCM
+
+## NAS 部署信息
+- 设备：Synology DS923+（synology_r1000_923+）
+- SSH 连接：`ssh -p 32000 riowang@192.168.31.18`
+- Docker/Compose 路径：`/usr/local/bin/docker`（需 `export PATH=/usr/local/bin:$PATH`）
+- 项目路径：`/volume1/docker/bitget-trading/`
+- 部署步骤：
+  ```bash
+  ssh -p 32000 riowang@192.168.31.18
+  export PATH=/usr/local/bin:$PATH
+  cd /volume1/docker/bitget-trading
+  git pull
+  docker compose down
+  docker compose build --no-cache
+  docker compose up -d
+  docker compose ps
+  docker compose logs app --tail 50
+  ```
+- 健康检查：`curl http://192.168.31.18:8847/api/health`
+- 前端访问：`http://192.168.31.18:8847`
 
 ## 编码标准
 - TypeScript 严格类型，禁用 `any`

@@ -51,6 +51,11 @@ export interface BaseStrategyConfig {
   // 轮询间隔
   pollIntervalMs: number;
   orderCheckIntervalMs: number;
+
+  // 追踪止损（可选）
+  trailingStopEnabled?: boolean;
+  trailingStopActivationPercent?: number;
+  trailingStopPercent?: number;
 }
 
 /** 剥头皮策略专属配置 */
@@ -61,6 +66,14 @@ export interface ScalpingStrategyConfig extends BaseStrategyConfig {
   priceSpread: string;
   maxPendingOrders: number;
   mergeThreshold: number;
+
+  // 动态价差（可选）
+  dynamicSpreadEnabled?: boolean;
+  volatilityMultiplier?: number;
+  maxDynamicSpread?: string;
+
+  // WebSocket 行情（可选）
+  useWebSocket?: boolean;
 }
 
 /** 网格策略专属配置 */
@@ -71,6 +84,13 @@ export interface GridStrategyConfig extends BaseStrategyConfig {
   lowerPrice: string;
   gridCount: number;
   gridType: 'arithmetic' | 'geometric';
+
+  // 自动再平衡（可选）
+  autoRebalance?: boolean;
+  rebalanceThresholdPercent?: number;
+
+  // WebSocket 行情（可选）
+  useWebSocket?: boolean;
 }
 
 /** 任意策略配置联合类型 */
@@ -130,7 +150,8 @@ export type StrategyEventType =
   | 'EMERGENCY_STOP'
   | 'GRID_BUY_FILLED'
   | 'GRID_SELL_FILLED'
-  | 'GRID_LEVEL_UPDATED';
+  | 'GRID_LEVEL_UPDATED'
+  | 'GRID_REBALANCED';
 
 /** 策略事件 */
 export interface StrategyEvent {

@@ -10,25 +10,27 @@
 
 ## 目录结构
 ```
-api/src/routes/           → API 路由层
-api/src/services/         → 业务逻辑层（现货 + 合约）
+api/src/routes/           → API 路由层（9 个：health/auth/config/logs/account/orders/market/strategy/instruments）
+api/src/services/         → 业务逻辑层（现货 + 合约 + 认证 + 配置 + WebSocket）
 api/src/services/interfaces/ → 统一服务接口（IOrderService, IMarketDataService, IAccountService）
-api/src/services/adapters/   → 合约/现货适配器（6 个适配器）
+api/src/services/adapters/   → 合约/现货适配器（6 个适配器，支持 UTA 自动路由）
 api/src/strategy/         → 策略引擎（剥头皮 + 网格）
 api/src/strategy/interfaces/ → 策略接口（IStrategy）
 api/src/strategy/presets/    → 风险等级预设
+api/src/strategy/indicators/ → 技术指标（ATR/RSI/BB/EMA/MACD + 市场状态检测）
 api/src/types/            → TypeScript 类型定义
-api/src/utils/            → 工具模块
+api/src/utils/            → 工具模块（结构化日志、错误处理）
 api/src/config/           → 配置层（Bitget SDK 初始化、数据库连接、迁移）
-api/src/middleware/        → 中间件（错误处理、限流）
-api/migrations/           → 数据库迁移脚本（4 个）
+api/src/middleware/        → 中间件（认证、限流、请求日志、错误处理）
+api/migrations/           → 数据库迁移脚本（6 个）
 api/scripts/              → 启动脚本（迁移 + 启动）
-frontend/app/             → Next.js 14 App Router
-frontend/components/      → React 组件（11 个：向导、选择器、表单、面板）
-frontend/hooks/           → SWR 数据钩子（8 个：状态、PnL、订单、事件、规格、搜索、计算、边界）
-frontend/lib/             → 工具库（API 客户端、类型、常量、格式化）
+frontend/app/             → Next.js 14 App Router（dashboard/login/settings）
+frontend/providers/       → AuthProvider（JWT 认证 Context）
+frontend/components/      → React 组件（15 个：向导、选择器、表单、面板、日志、用户管理）
+frontend/hooks/           → SWR 数据钩子（9 个：状态、PnL、订单、事件、规格、搜索、计算、边界、日志）
+frontend/lib/             → 工具库（API 客户端 + JWT、类型、常量、格式化）
 nginx/                    → 反向代理配置
-docker-compose.yml        → Docker 服务编排
+docker-compose.yml        → Docker 服务编排（nginx:8847 + api + frontend + postgres）
 docs/                     → 项目文档
 .claude/agents/           → Claude Code agent 定义
 ```
@@ -64,7 +66,14 @@ docs/                     → 项目文档
 
 ## 核心服务
 - `bitget-client.service.ts` → Bitget API 客户端封装（认证、签名、重试）
-- `trading-service.factory.ts` → 服务工厂（根据交易类型创建服务组合）
+- `trading-service.factory.ts` → 服务工厂（根据交易类型创建服务组合，支持 WebSocket 行情）
+- `auth.service.ts` → 认证服务（bcrypt 密码、JWT 签发/验证、用户 CRUD）
+- `system-config.service.ts` → 系统配置（AES-256-GCM 加密、内存缓存→DB→env）
+- `account-type-detector.service.ts` → UTA/经典账户类型检测（会话级缓存）
+- `websocket-client.service.ts` → WebSocket 客户端（公共/私有频道、自动重连、指数退避）
+- `realtime-market-data.service.ts` → 实时行情（WebSocket → REST 自动降级）
+- `candle-data.service.ts` → K线数据（REST + WebSocket 增量更新、多周期缓存、指标计算）
+- `log.service.ts` → 日志持久化（异步批量写入 DB、分页查询、自动清理）
 - `contract-spec.service.ts` → 合约规格（三层缓存：内存→DB→API）
 - `spot-spec.service.ts` → 现货规格（三层缓存）
 - `instrument-spec.service.ts` → 统一规格门面
@@ -74,24 +83,29 @@ docs/                     → 项目文档
 - `capital-manager.service.ts` → 资金管理
 - `futures-market-data.service.ts` → 合约行情（盘口深度、Ticker）
 - `futures-order.service.ts` → 合约订单（下单、撤单、批量撤单、挂单查询）
-- `futures-account.service.ts` → 合约账户（余额、权益、持仓模式检测）
+- `futures-account.service.ts` → 合约账户（余额、权益、持仓模式检测、UTA 适配）
 
 ## 策略引擎
 - `strategy-manager.ts` → 策略管理器（Singleton — 创建、注册、管理策略实例）
-- `scalping-strategy.engine.ts` → 剥头皮引擎（状态机 + 双循环 + post_only 自适应）
-- `grid-strategy.engine.ts` → 网格引擎（等差/等比网格 + 买卖循环）
+- `scalping-strategy.engine.ts` → 剥头皮引擎（状态机 + 双循环 + post_only 自适应 + 动态价差）
+- `grid-strategy.engine.ts` → 网格引擎（等差/等比网格 + 买卖循环 + 自动再平衡）
 - `grid-level-manager.ts` → 网格位管理（状态机 + 订单映射）
 - `strategy-config.manager.ts` → 运行时配置管理（热更新 + 验证）
 - `order-state-tracker.ts` → 内存订单状态追踪 + 对账
-- `risk-controller.ts` → 风控（回撤、止损、日亏限制）
+- `risk-controller.ts` → 风控（回撤、止损、日亏限制 + 追踪止损）
 - `merge-engine.ts` → 挂单合并（加权平均价）
-- `auto-calc.service.ts` → 自动计算（4 参数 → 完整配置 + 推导过程）
-- `presets/risk-presets.ts` → 风险等级预设（conservative/balanced/aggressive）
+- `auto-calc.service.ts` → 自动计算（4 参数 → 完整配置 + 推导过程 + 波动率参数）
+- `trailing-stop.ts` → 追踪止损（激活阈值 + 峰值跟踪 + 回撤触发）
+- `indicators/technical-indicators.ts` → 技术指标（ATR、RSI、布林带、EMA、MACD）
+- `indicators/market-regime-detector.ts` → 市场状态检测（trending/ranging/volatile）
+- `presets/risk-presets.ts` → 风险等级预设（conservative/balanced/aggressive + 波动率/再平衡/止损）
 
 ## 部署
-- Docker Compose: nginx(80) + api(3001) + frontend(3000) + postgres(5432)
+- Docker Compose: nginx(8847) + api(3001) + frontend(3000) + postgres(5432)
 - PostgreSQL 数据持久化: pg_data named volume
-- API 启动时自动运行数据库迁移（4 个迁移脚本）
+- API 启动时自动运行数据库迁移（6 个迁移脚本）
+- 认证：JWT + bcrypt，公开路由: health/auth，其余需 Bearer Token
+- 配置加密：ENCRYPTION_KEY 环境变量用于 AES-256-GCM
 
 ## 编码标准
 - TypeScript 严格类型，禁用 `any`
@@ -124,3 +138,10 @@ docs/                     → 项目文档
 - **先确认，再执行** — 不明确的需求必须先澄清
 - **最小变更** — 只做必要改动，不过度工程
 - **资金安全第一** — 涉及资金/订单的变更必须格外谨慎
+
+## 工作流规范
+- **中文交流** — 每次会话的询问、总结、文档均使用中文
+- **规划产出文档** — 每次完成规划后，需按照文档规范生成对应的文档（`docs/` 目录下）
+- **开发前建立文档** — 每次开始开发前，需建立开发文档记录目标、方案和变更范围
+- **开发后验证构建** — 每次开发、测试完成后，必须检查 TypeScript 编译（`npx tsc --noEmit`）确保构建无误
+- **构建通过即上传** — 构建正确、无误后，直接提交并推送到 GitHub（`git add` → `git commit` → `git push`）

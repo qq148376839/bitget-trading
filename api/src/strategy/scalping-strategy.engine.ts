@@ -42,6 +42,8 @@ import {
 import { StrategyType } from '../types/trading.types';
 import { ContractSpecInfo } from '../types/futures.types';
 import { InstrumentSpec } from '../types/trading.types';
+import { CandleDataService } from '../services/candle-data.service';
+import { IndicatorResult } from './indicators/technical-indicators';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
 
@@ -79,6 +81,9 @@ export class ScalpingStrategyEngine implements IStrategy {
   private persistenceService: StrategyPersistenceService;
   private lastConfig: ScalpingStrategyConfig = DEFAULT_SCALPING_CONFIG;
   private configLoaded = false;
+
+  private candleDataService: CandleDataService | null = null;
+  private lastDynamicSpread: string | null = null; // 缓存最近的动态价差
 
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
@@ -241,6 +246,21 @@ export class ScalpingStrategyEngine implements IStrategy {
 
       this.emitEvent('STRATEGY_STARTED', { config: this.lastConfig });
       logger.info('策略已启动', { symbol: this.lastConfig.symbol, direction: this.lastConfig.direction });
+
+      // 初始化动态价差所需的 K线数据服务
+      if (this.lastConfig.dynamicSpreadEnabled) {
+        this.candleDataService = CandleDataService.getInstance();
+        if (this.lastConfig.useWebSocket && this.lastConfig.productType) {
+          this.candleDataService.enableWebSocket(
+            this.lastConfig.tradingType === 'futures' ? 'mc' : 'sp',
+            this.lastConfig.symbol
+          );
+        }
+        logger.info('动态价差已启用', {
+          volatilityMultiplier: this.lastConfig.volatilityMultiplier,
+          maxDynamicSpread: this.lastConfig.maxDynamicSpread,
+        });
+      }
 
       // 启动双循环
       this.scheduleLoopA();
@@ -500,13 +520,18 @@ export class ScalpingStrategyEngine implements IStrategy {
           // 每 30 轮打印一次心跳日志（约 15 秒），确认策略在运行
           this.loopCounter++;
           if (this.loopCounter % 30 === 0) {
-            logger.info('等待买单成交中', {
+            logger.info('心跳：等待买单成交', {
               orderId: activeBuy.orderId,
               orderPrice: activeBuy.price,
               bid1,
               priceDiff: (bid1Num - orderPrice).toFixed(1),
               orderAge: `${(orderAge / 1000).toFixed(0)}s`,
               refreshThreshold: refreshThreshold.toFixed(1),
+              pendingSells: this.tracker.getPendingSellOrders().length,
+              totalPositionUsdt: this.tracker.getTotalPositionUsdt(),
+              realizedPnl: this.realizedPnl.toFixed(4),
+              tradeCount: this.tradeCount,
+              dynamicSpread: this.lastDynamicSpread,
             });
           }
         }
@@ -740,7 +765,18 @@ export class ScalpingStrategyEngine implements IStrategy {
 
   private async handleBuyFilled(buyOrder: TrackedOrder, config: ScalpingStrategyConfig): Promise<void> {
     const buyPrice = parseFloat(buyOrder.price);
-    const sellPrice = (buyPrice + parseFloat(config.priceSpread)).toFixed(config.pricePrecision);
+
+    // 使用动态价差（如果启用）或静态价差
+    let effectiveSpread = config.priceSpread;
+    if (config.dynamicSpreadEnabled && this.candleDataService) {
+      effectiveSpread = await this.calculateDynamicSpread(config, buyPrice);
+      logger.info('卖单使用动态价差', {
+        staticSpread: config.priceSpread,
+        dynamicSpread: effectiveSpread,
+        buyPrice: buyOrder.price,
+      });
+    }
+    const sellPrice = (buyPrice + parseFloat(effectiveSpread)).toFixed(config.pricePrecision);
 
     // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 3-5 秒）
     await this.sleep(3000);
@@ -943,6 +979,83 @@ export class ScalpingStrategyEngine implements IStrategy {
         size: sellOrder.size,
         note: '无法找到对应买单',
       });
+    }
+  }
+
+  // ============================================================
+  // 动态价差计算
+  // ============================================================
+
+  /**
+   * 根据技术指标动态计算价差
+   * - ATR: 基础波动率参考，ATR × volatilityMultiplier
+   * - RSI: 超买(>70)/超卖(<30) 时扩大价差（减少风险暴露）
+   * - Bollinger Band Width: 收窄时缩小价差（低波动抓小利润），放大时扩大价差
+   */
+  private async calculateDynamicSpread(
+    config: ScalpingStrategyConfig,
+    currentPrice: number
+  ): Promise<string> {
+    if (!this.candleDataService) {
+      return config.priceSpread;
+    }
+
+    try {
+      const indicators = await this.candleDataService.getLatestIndicators(
+        config.symbol,
+        config.productType
+      );
+
+      const staticSpread = parseFloat(config.priceSpread);
+      const multiplier = config.volatilityMultiplier ?? 1.2;
+      const maxDynamic = config.maxDynamicSpread
+        ? parseFloat(config.maxDynamicSpread)
+        : currentPrice * 0.01; // 默认最大为价格的 1%
+
+      // ATR 基础价差：ATR × multiplier
+      let dynamicSpread = indicators.atr * multiplier;
+
+      // RSI 调整：极端值时扩大价差
+      if (indicators.rsi > 70 || indicators.rsi < 30) {
+        const rsiExtremeFactor = 1 + Math.abs(indicators.rsi - 50) / 100;
+        dynamicSpread *= rsiExtremeFactor;
+        logger.debug('RSI 极端值调整价差', {
+          rsi: indicators.rsi.toFixed(1),
+          rsiExtremeFactor: rsiExtremeFactor.toFixed(3),
+        });
+      }
+
+      // Bollinger Band Width 调整：宽度比例影响价差
+      // bbWidth < 2% = 低波动（收紧），bbWidth > 4% = 高波动（放大）
+      const bbWidthPercent = indicators.bollingerWidth * 100;
+      if (bbWidthPercent < 2) {
+        // 低波动：价差缩小到 80%
+        dynamicSpread *= 0.8;
+      } else if (bbWidthPercent > 4) {
+        // 高波动：价差放大 20%
+        dynamicSpread *= 1.2;
+      }
+
+      // 价差不低于静态配置值，不超过最大动态价差
+      dynamicSpread = Math.max(dynamicSpread, staticSpread);
+      dynamicSpread = Math.min(dynamicSpread, maxDynamic);
+
+      const result = dynamicSpread.toFixed(config.pricePrecision);
+      this.lastDynamicSpread = result;
+
+      logger.debug('动态价差计算', {
+        staticSpread: config.priceSpread,
+        atr: indicators.atr.toFixed(config.pricePrecision),
+        rsi: indicators.rsi.toFixed(1),
+        bbWidth: `${bbWidthPercent.toFixed(2)}%`,
+        dynamicSpread: result,
+        multiplier,
+      });
+
+      return result;
+    } catch (error) {
+      logger.warn('动态价差计算失败，使用静态价差', { error: String(error) });
+      return config.priceSpread;
     }
   }
 

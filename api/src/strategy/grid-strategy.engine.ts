@@ -77,6 +77,7 @@ export class GridStrategyEngine implements IStrategy {
 
   /** Last known price for state reporting */
   private lastPrice: string | null = null;
+  private loopCounter = 0;
 
   constructor(services: TradingServices, instanceId = 'default') {
     this.orderService = services.orderService;
@@ -380,21 +381,52 @@ export class GridStrategyEngine implements IStrategy {
       const currentPrice = parseFloat(ticker.lastPr);
       this.lastPrice = ticker.lastPr;
 
-      // 2. 风控检查
+      // 2. 自动再平衡检测
+      if (config.autoRebalance && this.gridManager) {
+        const rebalanced = await this.checkAndRebalance(config, currentPrice);
+        if (rebalanced) {
+          // 再平衡后跳过本轮其余逻辑，下一轮重新开始
+          this.consecutiveErrors = 0;
+          this.scheduleMainLoop();
+          return;
+        }
+      }
+
+      // 3. 风控检查
       const positionUsdt = parseFloat(this.calculateTotalPositionUsdt());
       const riskCheck = this.riskController!.checkCanTrade(positionUsdt);
 
-      // 3. 对账：检测已成交订单
+      // 4. 对账：检测已成交订单
       await this.reconcileOrders(config, currentPrice);
 
-      // 4. 挂新的买单（仅在风控允许时）
+      // 5. 挂新的买单（仅在风控允许时）
       if (riskCheck.canTrade) {
         await this.placeBuyOrders(config, currentPrice);
       } else {
         logger.debug('风控拒绝交易', { reason: riskCheck.reason });
       }
 
-      // 5. 定期同步权益
+      // 6. 心跳日志（每 10 轮）
+      this.loopCounter++;
+      if (this.loopCounter % 10 === 0) {
+        const levels = this.gridManager?.getLevels() || [];
+        const emptyCount = levels.filter(l => l.state === 'empty').length;
+        const buyPendingCount = levels.filter(l => l.state === 'buy_pending').length;
+        const buyFilledCount = levels.filter(l => l.state === 'buy_filled').length;
+        const sellPendingCount = levels.filter(l => l.state === 'sell_pending').length;
+        logger.info('心跳：网格状态', {
+          currentPrice,
+          empty: emptyCount,
+          buyPending: buyPendingCount,
+          buyFilled: buyFilledCount,
+          sellPending: sellPendingCount,
+          totalPositionUsdt: this.calculateTotalPositionUsdt(),
+          realizedPnl: this.realizedPnl.toFixed(4),
+          tradeCount: this.tradeCount,
+        });
+      }
+
+      // 7. 定期同步权益
       try {
         const { equity, unrealizedPL } = await this.accountService.getAccountEquity(
           config.marginCoin || 'USDT'
@@ -411,6 +443,100 @@ export class GridStrategyEngine implements IStrategy {
     }
 
     this.scheduleMainLoop();
+  }
+
+  // ============================================================
+  // Auto-rebalance
+  // ============================================================
+
+  /**
+   * 检测价格是否突破网格范围，如突破则执行再平衡
+   * @returns true if rebalanced
+   */
+  private async checkAndRebalance(config: GridStrategyConfig, currentPrice: number): Promise<boolean> {
+    if (!this.gridManager || !this.configManager) return false;
+
+    const levels = this.gridManager.getLevels();
+    if (levels.length < 2) return false;
+
+    const upperPrice = parseFloat(levels[levels.length - 1].price);
+    const lowerPrice = parseFloat(levels[0].price);
+    const thresholdPercent = config.rebalanceThresholdPercent ?? 10;
+
+    // 检测价格是否突破范围
+    const upperThreshold = upperPrice * (1 + thresholdPercent / 100);
+    const lowerThreshold = lowerPrice * (1 - thresholdPercent / 100);
+
+    const breachedAbove = currentPrice > upperThreshold;
+    const breachedBelow = currentPrice < lowerThreshold;
+
+    if (!breachedAbove && !breachedBelow) return false;
+
+    const breachDirection = breachedAbove ? 'above' : 'below';
+    const breachPercent = breachedAbove
+      ? ((currentPrice - upperPrice) / upperPrice * 100).toFixed(2)
+      : ((lowerPrice - currentPrice) / lowerPrice * 100).toFixed(2);
+
+    logger.info('价格突破网格范围，触发再平衡', {
+      currentPrice,
+      upperPrice,
+      lowerPrice,
+      thresholdPercent,
+      breachDirection,
+      breachPercent: `${breachPercent}%`,
+    });
+
+    // 1. 撤销所有挂单
+    await this.cancelAllPendingOrders();
+
+    // 2. 以当前价为中心重建网格
+    const gridRange = upperPrice - lowerPrice;
+    const newUpperPrice = currentPrice + gridRange / 2;
+    const newLowerPrice = currentPrice - gridRange / 2;
+
+    // 更新配置
+    this.configManager.update({
+      upperPrice: newUpperPrice.toFixed(config.pricePrecision),
+      lowerPrice: newLowerPrice.toFixed(config.pricePrecision),
+    });
+    const newConfig = this.configManager.getGridConfig();
+    this.lastConfig = newConfig;
+
+    // 3. 重建网格位管理器
+    this.gridManager = new GridLevelManager({
+      upperPrice: newConfig.upperPrice,
+      lowerPrice: newConfig.lowerPrice,
+      gridCount: newConfig.gridCount,
+      gridType: newConfig.gridType,
+      orderAmountUsdt: newConfig.orderAmountUsdt,
+      pricePrecision: newConfig.pricePrecision,
+      sizePrecision: newConfig.sizePrecision,
+    });
+
+    // 4. 清理旧的追踪订单
+    this.trackedOrders.clear();
+
+    // 5. 保存新配置到 DB
+    this.persistenceService.saveActiveConfig(newConfig);
+
+    this.emitEvent('GRID_REBALANCED', {
+      reason: breachDirection,
+      breachPercent,
+      oldUpperPrice: String(upperPrice),
+      oldLowerPrice: String(lowerPrice),
+      newUpperPrice: newConfig.upperPrice,
+      newLowerPrice: newConfig.lowerPrice,
+      currentPrice,
+      gridSpacing: this.gridManager.getGridSpacing(),
+    });
+
+    logger.info('网格再平衡完成', {
+      newUpperPrice: newConfig.upperPrice,
+      newLowerPrice: newConfig.lowerPrice,
+      gridSpacing: this.gridManager.getGridSpacing(),
+    });
+
+    return true;
   }
 
   // ============================================================
@@ -480,6 +606,15 @@ export class GridStrategyEngine implements IStrategy {
     if (!this.gridManager) return;
 
     const levelsNeedingBuy = this.gridManager.getLevelsNeedingBuy(currentPrice);
+
+    if (levelsNeedingBuy.length > 0) {
+      logger.debug('空位网格需挂买单', {
+        currentPrice,
+        emptyLevelsCount: levelsNeedingBuy.length,
+        lowestEmptyPrice: levelsNeedingBuy[0]?.price,
+        highestEmptyPrice: levelsNeedingBuy[levelsNeedingBuy.length - 1]?.price,
+      });
+    }
 
     for (const level of levelsNeedingBuy) {
       // 检查仓位上限

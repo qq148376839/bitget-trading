@@ -4,6 +4,7 @@
  */
 
 import { BitgetClientService } from './bitget-client.service';
+import { AccountTypeDetectorService } from './account-type-detector.service';
 import { getBitgetConfig } from '../config/bitget';
 import { FuturesAccount, ProductType } from '../types/futures.types';
 import { createLogger } from '../utils/logger';
@@ -39,6 +40,14 @@ export class FuturesAccountService {
    * 注意：返回值沿用内部类型 single_hold / double_hold 便于向后兼容
    */
   async getHoldMode(productType: ProductType): Promise<HoldMode> {
+    // UTA 账户持仓模式处理
+    const detector = AccountTypeDetectorService.getInstance();
+    if (detector.isUTA()) {
+      // UTA 账户默认使用单向持仓
+      logger.info('UTA 账户，使用单向持仓模式');
+      return 'single_hold';
+    }
+
     try {
       const response = await this.client.get<{ posMode: string }>(
         '/api/v2/mix/account/position-mode',

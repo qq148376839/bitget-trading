@@ -4,6 +4,7 @@
  */
 
 import { BaseStrategyConfig } from '../types/strategy.types';
+import { TrailingStop } from './trailing-stop';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('risk-controller');
@@ -25,6 +26,9 @@ export class RiskController {
   // 冷却
   private coolingUntil: number | null = null;
 
+  // 追踪止损
+  private trailingStop: TrailingStop | null = null;
+
   // 统计
   private totalTrades = 0;
   private winTrades = 0;
@@ -37,6 +41,17 @@ export class RiskController {
     this.peakEquity = initialEquity;
     this.currentEquity = initialEquity;
     this.dailyResetDate = this.getTodayKey();
+
+    // Initialize trailing stop if configured
+    if (config.trailingStopEnabled) {
+      this.trailingStop = new TrailingStop(
+        {
+          activationPercent: config.trailingStopActivationPercent || 1,
+          trailingPercent: config.trailingStopPercent || 0.5,
+        },
+        initialEquity
+      );
+    }
   }
 
   /**
@@ -81,6 +96,15 @@ export class RiskController {
       if (drawdown >= this.config.maxDrawdownPercent) {
         this.triggerCooldown('回撤达到限制');
         return { canTrade: false, reason: `回撤 ${drawdown.toFixed(2)}%，限制 ${this.config.maxDrawdownPercent}%` };
+      }
+    }
+
+    // 检查追踪止损
+    if (this.trailingStop) {
+      const tsResult = this.trailingStop.check(this.currentEquity);
+      if (tsResult.shouldStop) {
+        this.triggerCooldown('追踪止损触发');
+        return { canTrade: false, reason: tsResult.reason };
       }
     }
 

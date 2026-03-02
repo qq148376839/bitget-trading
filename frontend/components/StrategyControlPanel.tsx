@@ -1,16 +1,17 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Card, Space, Button, Typography, Popconfirm, Alert, Descriptions, App } from 'antd';
+import { Card, Space, Button, Typography, Popconfirm, Alert, Descriptions, Tag, App } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
   StopOutlined,
   ClockCircleOutlined,
 } from '@ant-design/icons';
+import useSWR from 'swr';
 import { useStrategyStatus } from '@/hooks/useStrategyStatus';
 import StatusBadge from './StatusBadge';
-import { api } from '@/lib/api';
+import { api, swrFetcher } from '@/lib/api';
 import { formatUptime } from '@/lib/formatters';
 import { DIRECTION_LABELS } from '@/lib/constants';
 
@@ -18,6 +19,7 @@ const { Text } = Typography;
 
 export default function StrategyControlPanel() {
   const { status, refresh } = useStrategyStatus();
+  const { data: healthData } = useSWR<{ accountType?: string }>('/api/health', swrFetcher, { refreshInterval: 30000 });
   const { message } = App.useApp();
   const [loading, setLoading] = useState<string | null>(null);
 
@@ -107,7 +109,7 @@ export default function StrategyControlPanel() {
     >
       {status && (
         <>
-          <Descriptions size="small" column={5}>
+          <Descriptions size="small" column={6}>
             <Descriptions.Item label="状态">
               <StatusBadge status={status.status} />
             </Descriptions.Item>
@@ -125,6 +127,11 @@ export default function StrategyControlPanel() {
             </Descriptions.Item>
             <Descriptions.Item label="杠杆">
               {status.config?.leverage ? `${status.config.leverage}x` : '-'}
+            </Descriptions.Item>
+            <Descriptions.Item label="账户类型">
+              <Tag color={healthData?.accountType === 'uta' ? 'green' : 'blue'}>
+                {healthData?.accountType === 'uta' ? 'UTA' : healthData?.accountType === 'classic' ? '经典' : '-'}
+              </Tag>
             </Descriptions.Item>
           </Descriptions>
           {status.lastError && (

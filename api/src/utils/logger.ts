@@ -1,6 +1,9 @@
 /**
  * 日志工具模块
+ * JSON 结构化输出 + AsyncLocalStorage correlationId 传播
  */
+
+import { AsyncLocalStorage } from 'async_hooks';
 
 export enum LogLevel {
   DEBUG = 'DEBUG',
@@ -16,20 +19,52 @@ const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   [LogLevel.ERROR]: 3,
 };
 
-const currentLevel: LogLevel =
+let currentLevel: LogLevel =
   (process.env.LOG_LEVEL as LogLevel) || LogLevel.INFO;
+
+export function setLogLevel(level: LogLevel): void {
+  currentLevel = level;
+}
+
+export function getLogLevel(): LogLevel {
+  return currentLevel;
+}
 
 function shouldLog(level: LogLevel): boolean {
   return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[currentLevel];
 }
 
-function formatMessage(level: LogLevel, module: string, message: string, data?: unknown): string {
-  const timestamp = new Date().toISOString();
-  const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
-  return `[${timestamp}] [${level}] [${module}] ${message}${dataStr}`;
+// AsyncLocalStorage for request-scoped correlationId
+interface LogContext {
+  correlationId?: string;
 }
 
-export function createLogger(module: string) {
+export const logContext = new AsyncLocalStorage<LogContext>();
+
+export function getCorrelationId(): string | undefined {
+  return logContext.getStore()?.correlationId;
+}
+
+function formatMessage(level: LogLevel, module: string, message: string, data?: unknown): string {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    module,
+    message,
+    correlationId: getCorrelationId(),
+    ...(data !== undefined ? { data } : {}),
+  };
+  return JSON.stringify(entry);
+}
+
+export interface Logger {
+  debug(message: string, data?: unknown): void;
+  info(message: string, data?: unknown): void;
+  warn(message: string, data?: unknown): void;
+  error(message: string, data?: unknown): void;
+}
+
+export function createLogger(module: string): Logger {
   return {
     debug(message: string, data?: unknown): void {
       if (shouldLog(LogLevel.DEBUG)) {

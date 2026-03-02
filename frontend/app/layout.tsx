@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import AntdProvider from '@/providers/AntdProvider';
 import SWRProvider from '@/providers/SWRProvider';
+import { AuthProvider } from '@/providers/AuthProvider';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -17,7 +18,9 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body>
         <SWRProvider>
-          <AntdProvider>{children}</AntdProvider>
+          <AntdProvider>
+            <AuthProvider>{children}</AuthProvider>
+          </AntdProvider>
         </SWRProvider>
       </body>
     </html>

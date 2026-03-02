@@ -3,10 +3,12 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { AccountTypeDetectorService } from '../services/account-type-detector.service';
 
 const router = Router();
 
 router.get('/', (_req: Request, res: Response) => {
+  const accountType = AccountTypeDetectorService.getInstance().getAccountType();
   res.json({
     success: true,
     data: {
@@ -14,6 +16,7 @@ router.get('/', (_req: Request, res: Response) => {
       service: 'bitget-trading-api',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
+      accountType: accountType || 'unknown',
     },
   });
 });

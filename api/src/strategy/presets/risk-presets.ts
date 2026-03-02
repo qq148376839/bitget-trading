@@ -16,6 +16,14 @@ export interface ScalpingPreset {
   pollIntervalMs: number;
   orderCheckIntervalMs: number;
   cooldownMs: number;
+
+  // 动态价差
+  volatilityMultiplier: number;
+  maxDynamicSpreadPercent: number;
+
+  // 追踪止损
+  trailingStopActivationPercent: number;
+  trailingStopPercent: number;
 }
 
 export interface GridPreset {
@@ -28,6 +36,14 @@ export interface GridPreset {
   pollIntervalMs: number;
   orderCheckIntervalMs: number;
   cooldownMs: number;
+
+  // 自动再平衡
+  autoRebalance: boolean;
+  rebalanceThresholdPercent: number;
+
+  // 追踪止损
+  trailingStopActivationPercent: number;
+  trailingStopPercent: number;
 }
 
 export const SCALPING_PRESETS: Record<RiskLevel, ScalpingPreset> = {
@@ -42,6 +58,10 @@ export const SCALPING_PRESETS: Record<RiskLevel, ScalpingPreset> = {
     pollIntervalMs: 2000,
     orderCheckIntervalMs: 3000,
     cooldownMs: 120000,
+    volatilityMultiplier: 1.5,
+    maxDynamicSpreadPercent: 0.5,
+    trailingStopActivationPercent: 2,
+    trailingStopPercent: 1,
   },
   balanced: {
     spreadMultiplier: 2.0,
@@ -54,6 +74,10 @@ export const SCALPING_PRESETS: Record<RiskLevel, ScalpingPreset> = {
     pollIntervalMs: 1000,
     orderCheckIntervalMs: 2000,
     cooldownMs: 60000,
+    volatilityMultiplier: 1.2,
+    maxDynamicSpreadPercent: 0.8,
+    trailingStopActivationPercent: 1.5,
+    trailingStopPercent: 0.8,
   },
   aggressive: {
     spreadMultiplier: 1.5,
@@ -66,6 +90,10 @@ export const SCALPING_PRESETS: Record<RiskLevel, ScalpingPreset> = {
     pollIntervalMs: 500,
     orderCheckIntervalMs: 1000,
     cooldownMs: 30000,
+    volatilityMultiplier: 1.0,
+    maxDynamicSpreadPercent: 1.0,
+    trailingStopActivationPercent: 1,
+    trailingStopPercent: 0.5,
   },
 };
 
@@ -80,6 +108,10 @@ export const GRID_PRESETS: Record<RiskLevel, GridPreset> = {
     pollIntervalMs: 5000,
     orderCheckIntervalMs: 5000,
     cooldownMs: 120000,
+    autoRebalance: true,
+    rebalanceThresholdPercent: 15,
+    trailingStopActivationPercent: 2,
+    trailingStopPercent: 1,
   },
   balanced: {
     rangePercent: 10,
@@ -91,6 +123,10 @@ export const GRID_PRESETS: Record<RiskLevel, GridPreset> = {
     pollIntervalMs: 3000,
     orderCheckIntervalMs: 3000,
     cooldownMs: 60000,
+    autoRebalance: true,
+    rebalanceThresholdPercent: 10,
+    trailingStopActivationPercent: 1.5,
+    trailingStopPercent: 0.8,
   },
   aggressive: {
     rangePercent: 20,
@@ -102,5 +138,9 @@ export const GRID_PRESETS: Record<RiskLevel, GridPreset> = {
     pollIntervalMs: 2000,
     orderCheckIntervalMs: 2000,
     cooldownMs: 30000,
+    autoRebalance: true,
+    rebalanceThresholdPercent: 8,
+    trailingStopActivationPercent: 1,
+    trailingStopPercent: 0.5,
   },
 };

@@ -231,6 +231,29 @@ export class AutoCalcService {
       explanation: `数量精度来自交易对规格`,
     });
 
+    // 动态价差：ATR 基础的最大动态价差
+    const maxDynamicSpread = this.roundToPrice(range24h * (preset.maxDynamicSpreadPercent / 100), spec.pricePlace);
+    derivations.push({
+      field: 'volatilityMultiplier',
+      value: String(preset.volatilityMultiplier),
+      formula: `preset.volatilityMultiplier`,
+      explanation: `波动率乘数：ATR × 此乘数 = 动态价差基础值。${riskLevel}预设 = ${preset.volatilityMultiplier}`,
+    });
+    derivations.push({
+      field: 'maxDynamicSpread',
+      value: String(maxDynamicSpread),
+      formula: `${range24h.toFixed(2)} x ${preset.maxDynamicSpreadPercent}%`,
+      explanation: `最大动态价差 = 24h波动范围 × ${preset.maxDynamicSpreadPercent}%，防止价差过大`,
+    });
+
+    // 追踪止损
+    derivations.push({
+      field: 'trailingStop',
+      value: `activation=${preset.trailingStopActivationPercent}%, trail=${preset.trailingStopPercent}%`,
+      formula: `preset`,
+      explanation: `盈利达 ${preset.trailingStopActivationPercent}% 激活，回撤 ${preset.trailingStopPercent}% 触发止损`,
+    });
+
     const fullConfig: ScalpingStrategyConfig = {
       strategyType: 'scalping',
       tradingType,
@@ -249,6 +272,14 @@ export class AutoCalcService {
       orderCheckIntervalMs: preset.orderCheckIntervalMs,
       pricePrecision: spec.pricePlace,
       sizePrecision: spec.volumePlace,
+      // 动态价差（默认关闭，用户可手动开启）
+      dynamicSpreadEnabled: false,
+      volatilityMultiplier: preset.volatilityMultiplier,
+      maxDynamicSpread: String(maxDynamicSpread),
+      // 追踪止损
+      trailingStopEnabled: false,
+      trailingStopActivationPercent: preset.trailingStopActivationPercent,
+      trailingStopPercent: preset.trailingStopPercent,
       ...(tradingType === 'futures' ? {
         productType: 'USDT-FUTURES' as const,
         marginMode: 'crossed' as const,
@@ -380,6 +411,22 @@ export class AutoCalcService {
       explanation: `数量精度来自交易对规格`,
     });
 
+    // 自动再平衡
+    derivations.push({
+      field: 'autoRebalance',
+      value: `${preset.autoRebalance}, threshold=${preset.rebalanceThresholdPercent}%`,
+      formula: `preset`,
+      explanation: `价格突破网格范围 ${preset.rebalanceThresholdPercent}% 时自动重建网格`,
+    });
+
+    // 追踪止损
+    derivations.push({
+      field: 'trailingStop',
+      value: `activation=${preset.trailingStopActivationPercent}%, trail=${preset.trailingStopPercent}%`,
+      formula: `preset`,
+      explanation: `盈利达 ${preset.trailingStopActivationPercent}% 激活，回撤 ${preset.trailingStopPercent}% 触发止损`,
+    });
+
     const fullConfig: GridStrategyConfig = {
       strategyType: 'grid',
       tradingType,
@@ -399,6 +446,13 @@ export class AutoCalcService {
       orderCheckIntervalMs: preset.orderCheckIntervalMs,
       pricePrecision: spec.pricePlace,
       sizePrecision: spec.volumePlace,
+      // 自动再平衡
+      autoRebalance: preset.autoRebalance,
+      rebalanceThresholdPercent: preset.rebalanceThresholdPercent,
+      // 追踪止损
+      trailingStopEnabled: false,
+      trailingStopActivationPercent: preset.trailingStopActivationPercent,
+      trailingStopPercent: preset.trailingStopPercent,
       ...(tradingType === 'futures' ? {
         productType: 'USDT-FUTURES' as const,
         marginMode: 'crossed' as const,

@@ -6,6 +6,10 @@ import type {
   AnyStrategyConfig,
   ContractSpecInfo,
   InstrumentSpec,
+  MacroSignalSnapshot,
+  PolymarketSignalConfig,
+  PolymarketWatchItem,
+  PolymarketSearchResult,
 } from './types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || '';
@@ -119,6 +123,30 @@ export const api = {
     request<unknown>('/api/auth/password', {
       method: 'PUT',
       body: JSON.stringify({ oldPassword, newPassword }),
+    }),
+
+  // Polymarket
+  getPolymarketSignal: () =>
+    request<MacroSignalSnapshot>('/api/polymarket/signal'),
+  getPolymarketConfig: () =>
+    request<PolymarketSignalConfig>('/api/polymarket/config'),
+  updatePolymarketConfig: (config: Partial<PolymarketSignalConfig>) =>
+    request<PolymarketSignalConfig>('/api/polymarket/config', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
+  pollPolymarket: () =>
+    request<MacroSignalSnapshot>('/api/polymarket/poll', { method: 'POST' }),
+  searchPolymarketMarkets: (query: string) =>
+    request<PolymarketSearchResult[]>(`/api/polymarket/search?q=${encodeURIComponent(query)}`),
+  addPolymarketWatch: (item: PolymarketWatchItem) =>
+    request<PolymarketSignalConfig>('/api/polymarket/watchlist', {
+      method: 'POST',
+      body: JSON.stringify(item),
+    }),
+  removePolymarketWatch: (conditionId: string) =>
+    request<PolymarketSignalConfig>(`/api/polymarket/watchlist/${encodeURIComponent(conditionId)}`, {
+      method: 'DELETE',
     }),
 };
 

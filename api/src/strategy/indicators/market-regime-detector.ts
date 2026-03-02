@@ -5,6 +5,7 @@
 
 import { Candle, calcATR, calcRSI, calcBollingerBands, calcEMA } from './technical-indicators';
 import { createLogger } from '../../utils/logger';
+import type { SignalDirection, MacroSignalSnapshot } from '../../types/polymarket.types';
 
 const logger = createLogger('market-regime');
 
@@ -98,5 +99,32 @@ export function detectMarketRegime(candles: Candle[]): MarketRegimeResult {
     rsi,
     bollingerWidth: bb.width,
     trendStrength,
+  };
+}
+
+/**
+ * 市场状态 + 宏观信号增强结果
+ */
+export interface EnrichedMarketRegimeResult extends MarketRegimeResult {
+  macroRiskScore: number;
+  macroDirection: SignalDirection;
+  macroConfidence: number;
+  macroAlertActive: boolean;
+}
+
+/**
+ * 纯函数：将技术面市场状态与 Polymarket 宏观信号合并
+ * 不修改原始 regime 结果，仅在其基础上附加宏观字段
+ */
+export function enrichWithMacroSignal(
+  regime: MarketRegimeResult,
+  signal: MacroSignalSnapshot
+): EnrichedMarketRegimeResult {
+  return {
+    ...regime,
+    macroRiskScore: signal.riskScore,
+    macroDirection: signal.direction,
+    macroConfidence: signal.confidence,
+    macroAlertActive: signal.hasAlert,
   };
 }

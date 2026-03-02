@@ -38,6 +38,7 @@ import { StrategyType } from '../types/trading.types';
 import { ContractSpecInfo } from '../types/futures.types';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
+import { PolymarketSignalService } from '../services/polymarket-signal.service';
 
 const logger = createLogger('grid-engine');
 
@@ -461,7 +462,11 @@ export class GridStrategyEngine implements IStrategy {
 
     const upperPrice = parseFloat(levels[levels.length - 1].price);
     const lowerPrice = parseFloat(levels[0].price);
-    const thresholdPercent = config.rebalanceThresholdPercent ?? 10;
+    const baseThresholdPercent = config.rebalanceThresholdPercent ?? 10;
+
+    // 宏观信号调整再平衡灵敏度
+    const macroGridAdj = this.getMacroGridAdjustment();
+    const thresholdPercent = baseThresholdPercent / macroGridAdj.rebalanceSensitivity;
 
     // 检测价格是否突破范围
     const upperThreshold = upperPrice * (1 + thresholdPercent / 100);
@@ -489,8 +494,8 @@ export class GridStrategyEngine implements IStrategy {
     // 1. 撤销所有挂单
     await this.cancelAllPendingOrders();
 
-    // 2. 以当前价为中心重建网格
-    const gridRange = upperPrice - lowerPrice;
+    // 2. 以当前价为中心重建网格（宏观信号调整网格宽度）
+    const gridRange = (upperPrice - lowerPrice) * macroGridAdj.widthMultiplier;
     const newUpperPrice = currentPrice + gridRange / 2;
     const newLowerPrice = currentPrice - gridRange / 2;
 
@@ -1053,6 +1058,18 @@ export class GridStrategyEngine implements IStrategy {
       if (status === 'filled') {
         order.filledAt = Date.now();
       }
+    }
+  }
+
+  /**
+   * 获取宏观信号网格调整
+   * 服务未初始化时安全降级返回中性值
+   */
+  private getMacroGridAdjustment(): { widthMultiplier: number; rebalanceSensitivity: number; riskScore: number } {
+    try {
+      return PolymarketSignalService.getInstance().getGridAdjustment();
+    } catch {
+      return { widthMultiplier: 1.0, rebalanceSensitivity: 1.0, riskScore: 50 };
     }
   }
 

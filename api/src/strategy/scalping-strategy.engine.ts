@@ -46,6 +46,7 @@ import { CandleDataService } from '../services/candle-data.service';
 import { IndicatorResult } from './indicators/technical-indicators';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
+import { PolymarketSignalService } from '../services/polymarket-signal.service';
 
 const logger = createLogger('scalping-engine');
 
@@ -571,6 +572,14 @@ export class ScalpingStrategyEngine implements IStrategy {
       const useGtc = this.consecutivePostOnlyCancels >= 5;
       force = useGtc ? 'gtc' : 'post_only';
     }
+
+    // 宏观信号调整：bearish + 高风险 → 增加 tick offset（更保守入场）
+    const macroSpread = this.getMacroSpreadAdjustment();
+    if (macroSpread.direction === 'bearish' && macroSpread.riskScore > 70) {
+      const extraTicks = Math.ceil((macroSpread.riskScore - 70) / 15);
+      adaptiveTickOffset += extraTicks;
+    }
+
     const adjustedPrice = parseFloat(bidPrice) - tickSize * adaptiveTickOffset;
     const price = adjustedPrice.toFixed(config.pricePrecision);
 
@@ -1036,6 +1045,10 @@ export class ScalpingStrategyEngine implements IStrategy {
         dynamicSpread *= 1.2;
       }
 
+      // 宏观信号调整价差
+      const macroAdj = this.getMacroSpreadAdjustment();
+      dynamicSpread *= macroAdj.multiplier;
+
       // 价差不低于静态配置值，不超过最大动态价差
       dynamicSpread = Math.max(dynamicSpread, staticSpread);
       dynamicSpread = Math.min(dynamicSpread, maxDynamic);
@@ -1062,6 +1075,18 @@ export class ScalpingStrategyEngine implements IStrategy {
   // ============================================================
   // 辅助方法
   // ============================================================
+
+  /**
+   * 获取宏观信号价差调整
+   * 服务未初始化时安全降级返回中性值
+   */
+  private getMacroSpreadAdjustment(): { multiplier: number; direction: string; riskScore: number } {
+    try {
+      return PolymarketSignalService.getInstance().getSpreadAdjustment();
+    } catch {
+      return { multiplier: 1.0, direction: 'neutral', riskScore: 50 };
+    }
+  }
 
   private checkFeeCoverage(config: ScalpingStrategyConfig, spec: ContractSpecInfo): void {
     const spread = parseFloat(config.priceSpread);

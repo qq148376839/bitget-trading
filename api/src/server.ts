@@ -34,6 +34,8 @@ import { AuthService } from './services/auth.service';
 import { LogService } from './services/log.service';
 import { loadBitgetConfigFromDB } from './config/bitget';
 import { AccountTypeDetectorService } from './services/account-type-detector.service';
+import polymarketRouter from './routes/polymarket';
+import { PolymarketSignalService } from './services/polymarket-signal.service';
 
 const logger = createLogger('server');
 const app = express();
@@ -58,6 +60,7 @@ app.use('/api/strategy', authRequired, strategyRouter);
 app.use('/api/contracts', authRequired, contractsRouter);
 app.use('/api/instruments', authRequired, instrumentsRouter);
 app.use('/api/logs', authRequired, logsRouter);
+app.use('/api/polymarket', authRequired, polymarketRouter);
 
 // === Frontend 代理（生产模式：将非 API 请求代理到 Next.js）===
 if (process.env.NODE_ENV === 'production') {
@@ -125,6 +128,22 @@ async function bootstrap(): Promise<void> {
     logger.warn('账户类型检测失败', { error: String(error) });
   }
 
+  // 7. 初始化 Polymarket 信号服务
+  try {
+    const polymarketService = PolymarketSignalService.getInstance();
+    const configService = SystemConfigService.getInstance();
+    const savedConfig = await configService.get('polymarket_signal_config');
+    if (savedConfig) {
+      const parsed = JSON.parse(savedConfig);
+      polymarketService.updateConfig(parsed);
+      logger.info('Polymarket 信号服务配置已从 DB 加载', { enabled: parsed.enabled });
+    } else {
+      logger.info('Polymarket 信号服务未配置，使用默认（禁用）');
+    }
+  } catch (error) {
+    logger.warn('Polymarket 信号服务初始化失败', { error: String(error) });
+  }
+
   server = app.listen(PORT, () => {
     logger.info(`Bitget Trading API 已启动`, { port: PORT });
     logger.info(`健康检查: http://localhost:${PORT}/api/health`);
@@ -144,6 +163,14 @@ async function gracefulShutdown(signal: string): Promise<void> {
     logger.info('策略管理器已停止');
   } catch (error) {
     logger.warn('停止策略管理器出错', { error: String(error) });
+  }
+
+  // 停止 Polymarket 信号服务
+  try {
+    PolymarketSignalService.getInstance().stop();
+    logger.info('Polymarket 信号服务已停止');
+  } catch (error) {
+    logger.warn('停止 Polymarket 信号服务出错', { error: String(error) });
   }
 
   server.close(() => {

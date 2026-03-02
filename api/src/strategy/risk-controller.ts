@@ -6,6 +6,8 @@
 import { BaseStrategyConfig } from '../types/strategy.types';
 import { TrailingStop } from './trailing-stop';
 import { createLogger } from '../utils/logger';
+import { PolymarketSignalService } from '../services/polymarket-signal.service';
+import type { RiskAdjustment } from '../types/polymarket.types';
 
 const logger = createLogger('risk-controller');
 
@@ -73,28 +75,33 @@ export class RiskController {
       this.dailyResetDate = today;
     }
 
-    // 检查冷却期
+    // 获取宏观风控调整
+    const macroAdj = this.getMacroRiskAdjustment();
+
+    // 检查冷却期（宏观调整冷却时间）
     if (this.coolingUntil !== null) {
-      if (Date.now() < this.coolingUntil) {
-        const remaining = Math.ceil((this.coolingUntil - Date.now()) / 1000);
+      const adjustedCoolingEnd = this.coolingUntil;
+      if (Date.now() < adjustedCoolingEnd) {
+        const remaining = Math.ceil((adjustedCoolingEnd - Date.now()) / 1000);
         return { canTrade: false, reason: `风控冷却中，剩余 ${remaining} 秒` };
       }
       this.coolingUntil = null;
       logger.info('冷却期结束，恢复交易');
     }
 
-    // 检查每日亏损限制
-    const maxDailyLoss = parseFloat(this.config.maxDailyLossUsdt);
+    // 检查每日亏损限制（宏观调整限额）
+    const baseDailyLoss = parseFloat(this.config.maxDailyLossUsdt);
+    const maxDailyLoss = baseDailyLoss / macroAdj.dailyLossMultiplier;
     if (this.dailyPnl < 0 && Math.abs(this.dailyPnl) >= maxDailyLoss) {
-      this.triggerCooldown('每日亏损达到限制');
-      return { canTrade: false, reason: `每日亏损已达 ${Math.abs(this.dailyPnl).toFixed(2)} USDT，限制 ${maxDailyLoss} USDT` };
+      this.triggerCooldown('每日亏损达到限制', macroAdj.cooldownMultiplier);
+      return { canTrade: false, reason: `每日亏损已达 ${Math.abs(this.dailyPnl).toFixed(2)} USDT，限制 ${maxDailyLoss.toFixed(2)} USDT` };
     }
 
     // 检查最大回撤
     if (this.peakEquity > 0) {
       const drawdown = ((this.peakEquity - this.currentEquity) / this.peakEquity) * 100;
       if (drawdown >= this.config.maxDrawdownPercent) {
-        this.triggerCooldown('回撤达到限制');
+        this.triggerCooldown('回撤达到限制', macroAdj.cooldownMultiplier);
         return { canTrade: false, reason: `回撤 ${drawdown.toFixed(2)}%，限制 ${this.config.maxDrawdownPercent}%` };
       }
     }
@@ -103,18 +110,36 @@ export class RiskController {
     if (this.trailingStop) {
       const tsResult = this.trailingStop.check(this.currentEquity);
       if (tsResult.shouldStop) {
-        this.triggerCooldown('追踪止损触发');
+        this.triggerCooldown('追踪止损触发', macroAdj.cooldownMultiplier);
         return { canTrade: false, reason: tsResult.reason };
       }
     }
 
-    // 检查仓位上限
-    const maxPosition = parseFloat(this.config.maxPositionUsdt);
+    // 检查仓位上限（宏观调整上限）
+    const baseMaxPosition = parseFloat(this.config.maxPositionUsdt);
+    const maxPosition = baseMaxPosition * macroAdj.positionMultiplier;
     if (currentPositionUsdt >= maxPosition) {
-      return { canTrade: false, reason: `仓位 ${currentPositionUsdt.toFixed(2)} USDT 已达上限 ${maxPosition} USDT` };
+      return { canTrade: false, reason: `仓位 ${currentPositionUsdt.toFixed(2)} USDT 已达上限 ${maxPosition.toFixed(2)} USDT` };
     }
 
     return { canTrade: true, reason: null };
+  }
+
+  /**
+   * 获取宏观风控调整乘数
+   * 服务未初始化时安全降级返回中性值
+   */
+  private getMacroRiskAdjustment(): RiskAdjustment {
+    try {
+      return PolymarketSignalService.getInstance().getRiskAdjustment();
+    } catch {
+      return {
+        dailyLossMultiplier: 1.0,
+        drawdownMultiplier: 1.0,
+        positionMultiplier: 1.0,
+        cooldownMultiplier: 1.0,
+      };
+    }
   }
 
   /**
@@ -184,11 +209,13 @@ export class RiskController {
   /**
    * 触发冷却
    */
-  private triggerCooldown(reason: string): void {
-    this.coolingUntil = Date.now() + this.config.cooldownMs;
+  private triggerCooldown(reason: string, cooldownMultiplier = 1.0): void {
+    const adjustedCooldown = Math.round(this.config.cooldownMs * cooldownMultiplier);
+    this.coolingUntil = Date.now() + adjustedCooldown;
     logger.warn('触发风控冷却', {
       reason,
-      cooldownMs: this.config.cooldownMs,
+      cooldownMs: adjustedCooldown,
+      cooldownMultiplier,
       resumeAt: new Date(this.coolingUntil).toISOString(),
     });
   }

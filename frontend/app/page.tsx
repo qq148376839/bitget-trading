@@ -12,6 +12,7 @@ import MetricsCards from '@/components/MetricsCards';
 import OrderTable from '@/components/OrderTable';
 import EventLog from '@/components/EventLog';
 import ConfigWizard from '@/components/ConfigWizard';
+import PolymarketSignalPanel from '@/components/PolymarketSignalPanel';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import { useStrategyStatus } from '@/hooks/useStrategyStatus';
 import { useAuth } from '@/providers/AuthProvider';
@@ -71,6 +72,9 @@ function DashboardContent() {
           </Col>
           <Col span={8}>
             <EventLog />
+          </Col>
+          <Col span={24}>
+            <PolymarketSignalPanel />
           </Col>
           <Col span={24}>
             <ConfigWizard />

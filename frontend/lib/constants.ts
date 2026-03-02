@@ -1,4 +1,4 @@
-import type { StrategyStatus, StrategyEventType, StrategyType, TradingType } from './types';
+import type { StrategyStatus, StrategyEventType, StrategyType, TradingType, SignalDirection, PolymarketCategory } from './types';
 
 export const POLL_INTERVAL_MS = 2000;
 export const ORDERS_POLL_INTERVAL_MS = 3000;
@@ -66,4 +66,37 @@ export const STRATEGY_TYPE_LABELS: Record<StrategyType, string> = {
 export const TRADING_TYPE_LABELS: Record<TradingType, string> = {
   futures: '合约',
   spot: '现货',
+};
+
+// Polymarket
+
+export const POLYMARKET_SIGNAL_POLL_MS = 30000;
+
+export const RISK_SCORE_LABELS: Record<string, string> = {
+  low: '低风险',
+  medium: '中性',
+  high: '高风险',
+  extreme: '极高风险',
+};
+
+export const SIGNAL_DIRECTION_LABELS: Record<SignalDirection, string> = {
+  bullish: '看涨',
+  bearish: '看跌',
+  neutral: '中性',
+};
+
+export const SIGNAL_DIRECTION_COLORS: Record<SignalDirection, string> = {
+  bullish: 'green',
+  bearish: 'red',
+  neutral: 'default',
+};
+
+export const POLYMARKET_CATEGORY_LABELS: Record<PolymarketCategory, string> = {
+  fed_rate: 'Fed 利率',
+  btc_milestone: 'BTC 里程碑',
+  eth_milestone: 'ETH 里程碑',
+  geopolitical: '地缘政治',
+  regulation: '监管',
+  macro_economic: '宏观经济',
+  custom: '自定义',
 };

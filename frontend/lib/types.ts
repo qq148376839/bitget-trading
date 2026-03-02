@@ -181,3 +181,73 @@ export interface OrdersResponse {
   cancelled: number;
   orders: TrackedOrder[];
 }
+
+// ============================================================
+// Polymarket 预测市场信号
+// ============================================================
+
+/** 信号方向 */
+export type SignalDirection = 'bullish' | 'bearish' | 'neutral';
+
+/** 市场分类 */
+export type PolymarketCategory =
+  | 'fed_rate'
+  | 'btc_milestone'
+  | 'eth_milestone'
+  | 'geopolitical'
+  | 'regulation'
+  | 'macro_economic'
+  | 'custom';
+
+/** 监控项配置 */
+export interface PolymarketWatchItem {
+  conditionId: string;
+  label: string;
+  category: PolymarketCategory;
+  impactDirection: 'bullish' | 'bearish';
+  weight: number;
+  deltaThresholdPercent: number;
+}
+
+/** 单市场信号快照 */
+export interface MarketSignalSnapshot {
+  conditionId: string;
+  label: string;
+  category: PolymarketCategory;
+  currentProb: number;
+  delta1h: number;
+  delta24h: number;
+  volume: number;
+  alertTriggered: boolean;
+  lastUpdated: number;
+}
+
+/** 综合宏观信号快照 */
+export interface MacroSignalSnapshot {
+  riskScore: number;
+  direction: SignalDirection;
+  confidence: number;
+  hasAlert: boolean;
+  markets: MarketSignalSnapshot[];
+  lastPollAt: number;
+  enabled: boolean;
+}
+
+/** Polymarket 服务配置 */
+export interface PolymarketSignalConfig {
+  enabled: boolean;
+  pollIntervalMs: number;
+  proxyUrl: string;
+  watchList: PolymarketWatchItem[];
+  sensitivityMultiplier: number;
+  maxRiskMultiplier: number;
+}
+
+/** 市场搜索结果 */
+export interface PolymarketSearchResult {
+  conditionId: string;
+  question: string;
+  volume: number;
+  active: boolean;
+  outcomePrices: string[];
+}

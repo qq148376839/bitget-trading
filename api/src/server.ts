@@ -10,6 +10,7 @@ import path from 'path';
 // 加载环境变量
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import { errorHandler } from './middleware/error-handler';
 import { apiRateLimiter } from './middleware/rate-limiter';
 import { authRequired } from './middleware/auth.middleware';
@@ -57,6 +58,17 @@ app.use('/api/strategy', authRequired, strategyRouter);
 app.use('/api/contracts', authRequired, contractsRouter);
 app.use('/api/instruments', authRequired, instrumentsRouter);
 app.use('/api/logs', authRequired, logsRouter);
+
+// === Frontend 代理（生产模式：将非 API 请求代理到 Next.js）===
+if (process.env.NODE_ENV === 'production') {
+  app.use(
+    createProxyMiddleware({
+      target: 'http://localhost:3000',
+      changeOrigin: true,
+      ws: true,
+    })
+  );
+}
 
 // 错误处理
 app.use(errorHandler);

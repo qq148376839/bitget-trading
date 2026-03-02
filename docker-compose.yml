@@ -1,27 +1,10 @@
-version: '3.8'
-
 services:
-  nginx:
+  app:
     build:
-      context: ./nginx
+      context: .
       dockerfile: Dockerfile
     ports:
-      - "8847:80"
-    depends_on:
-      - api
-      - frontend
-    restart: unless-stopped
-    networks:
-      - trading-net
-
-  api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-      args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
+      - "8847:3001"
     env_file:
       - .env
     environment:
@@ -31,20 +14,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - trading-net
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-}
-    environment:
-      - NODE_ENV=production
     restart: unless-stopped
     networks:
       - trading-net

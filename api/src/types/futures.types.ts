@@ -180,3 +180,29 @@ export interface FuturesAccount {
   unrealizedPL: string;
   bonus: string;
 }
+
+/** 合约持仓信息（all-position API 返回） */
+export interface FuturesPosition {
+  marginCoin: string;
+  symbol: string;
+  holdSide: 'long' | 'short' | 'net';
+  openDelegateSize: string;
+  marginSize: string;
+  available: string;
+  locked: string;
+  total: string;
+  leverage: string;
+  achievedProfits: string;
+  openPriceAvg: string;
+  marginMode: MarginMode;
+  posMode: string;
+  unrealizedPL: string;
+  liquidationPrice: string;
+  keepMarginRate: string;
+  markPrice: string;
+  breakEvenPrice: string;
+  totalFee: string;
+  deductedFee: string;
+  cTime: string;
+  uTime: string;
+}

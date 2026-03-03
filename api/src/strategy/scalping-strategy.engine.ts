@@ -790,6 +790,37 @@ export class ScalpingStrategyEngine implements IStrategy {
     // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 5-8 秒）
     await this.sleep(5000);
 
+    // 卖单前检查持仓是否已到位，同时从持仓 holdSide 验证/纠正 holdMode
+    if (config.tradingType === 'futures' && config.productType) {
+      try {
+        const futuresAccountSvc = new FuturesAccountService();
+        const positions = await futuresAccountSvc.getPositions(
+          config.productType, config.marginCoin || 'USDT'
+        );
+        const pos = positions.find(
+          p => p.symbol === config.symbol && parseFloat(p.total) > 0
+        );
+        if (!pos) {
+          logger.warn('卖单前检查：持仓未到位，额外等待', { symbol: config.symbol });
+          await this.sleep(3000);
+        } else {
+          // 从持仓 holdSide 验证/纠正 holdMode
+          const inferredMode: HoldMode = pos.holdSide === 'net' ? 'single_hold' : 'double_hold';
+          if (inferredMode !== this.holdMode) {
+            logger.info('从持仓列表更新持仓模式', {
+              old: this.holdMode, new: inferredMode, holdSide: pos.holdSide,
+            });
+            this.holdMode = inferredMode;
+            if (this.mergeEngine) {
+              this.mergeEngine.updateHoldMode(inferredMode);
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn('卖单前持仓检查失败，继续使用已知 holdMode', { error: String(error) });
+      }
+    }
+
     // 重试策略：（动态切换持仓模式）
     // Attempts 1-2: 按检测到的 holdMode 尝试
     // Attempt 3: 如果连续 22002/40774，自动切换 holdMode 并重试

@@ -5,8 +5,7 @@
 
 import { BitgetClientService } from './bitget-client.service';
 import { AccountTypeDetectorService } from './account-type-detector.service';
-import { getBitgetConfig } from '../config/bitget';
-import { FuturesAccount, ProductType } from '../types/futures.types';
+import { FuturesAccount, FuturesPosition, ProductType } from '../types/futures.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('futures-account');
@@ -37,83 +36,106 @@ export class FuturesAccountService {
    * one_way_mode = 单向持仓（不需要 tradeSide）
    * hedge_mode = 双向持仓（需要 tradeSide: open/close）
    *
+   * 检测策略（实盘 + 模拟盘通用）：
+   * 1. UTA 账户 → single_hold
+   * 2. GET /api/v2/mix/account/position-mode → 解析 posMode
+   * 3. 若步骤 2 失败 → 从持仓列表 holdSide 推断
+   * 4. 所有方法失败 → 默认 double_hold（安全策略）
+   *
    * 注意：返回值沿用内部类型 single_hold / double_hold 便于向后兼容
    */
   async getHoldMode(productType: ProductType): Promise<HoldMode> {
-    // UTA 账户持仓模式处理
+    // 1. UTA 账户持仓模式处理
     const detector = AccountTypeDetectorService.getInstance();
     if (detector.isUTA()) {
-      // UTA 账户默认使用单向持仓
       logger.info('UTA 账户，使用单向持仓模式');
       return 'single_hold';
     }
 
+    // 2. 通过 position-mode API 查询（实盘 + 模拟盘通用）
     try {
-      const response = await this.client.get<{ posMode: string }>(
-        '/api/v2/mix/account/position-mode',
-        { productType }
-      );
-      const posMode = response.data?.posMode;
-      logger.info('持仓模式 API 原始返回', { posMode, rawData: JSON.stringify(response.data) });
-      if (posMode === 'hedge_mode') return 'double_hold';
-      if (posMode === 'one_way_mode') return 'single_hold';
-      // 兼容旧字段格式
-      const raw = response.data as unknown as Record<string, string>;
-      if (raw?.holdMode === 'double_hold') return 'double_hold';
-      // 无法识别时默认双向持仓（更安全，确保 tradeSide 始终发送）
-      logger.warn('无法识别持仓模式，默认双向持仓', { rawData: JSON.stringify(response.data) });
-      return 'double_hold';
+      return await this.queryPositionModeAPI(productType);
     } catch (error) {
-      // 模拟盘 position-mode GET API 返回 404，但 SET API 可用
-      const { simulated } = getBitgetConfig();
-      if (simulated) {
-        return this.detectSimulatedHoldMode(productType);
-      }
-      // 实盘查询失败时默认双向持仓（更安全，确保 tradeSide 始终发送，避免 40774 错误）
-      logger.warn('持仓模式查询失败，默认双向持仓', { error: String(error) });
-      return 'double_hold';
+      logger.warn('position-mode API 查询失败，尝试从持仓列表推断', { error: String(error) });
     }
+
+    // 3. 从持仓列表推断
+    try {
+      return await this.inferHoldModeFromPositions(productType);
+    } catch (error) {
+      logger.warn('从持仓列表推断持仓模式失败', { error: String(error) });
+    }
+
+    // 4. 所有方法失败 → 默认双向持仓（更安全，确保 tradeSide 始终发送，避免 40774 错误）
+    logger.warn('所有持仓模式检测方法失败，默认双向持仓');
+    return 'double_hold';
   }
 
   /**
-   * 模拟盘持仓模式检测（GET API 返回 404，通过 SET API 探测）
-   *
-   * 策略：尝试设置 one_way_mode（最多重试 2 次应对 502）
-   * - 成功 → 使用 single_hold（无 tradeSide）
-   * - 失败 40920（有持仓/订单无法切换）→ 使用 double_hold（保守策略，带 tradeSide）
-   * - 网络错误（502 等）→ 默认 double_hold（更安全）
+   * 查询所有持仓（公开方法，策略引擎也可调用）
    */
-  private async detectSimulatedHoldMode(productType: ProductType): Promise<HoldMode> {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await this.client.post('/api/v2/mix/account/set-position-mode', {
-          productType,
-          posMode: 'one_way_mode',
-        });
-        logger.info('模拟盘持仓模式已设置为单向持仓（one_way_mode）');
-        return 'single_hold';
-      } catch (setError) {
-        const errMsg = String(setError);
-        if (errMsg.includes('40920')) {
-          // 有持仓/订单无法切换 → 当前处于某种模式且有仓位
-          // 保守使用 double_hold（带 tradeSide），因为：
-          // - 如果实际是 hedge_mode，不带 tradeSide 会报 40774
-          // - 如果实际是 one_way_mode，带 tradeSide 时 buy+open 被忽略，sell+close 可能 22002 但重试能恢复
-          logger.info('模拟盘有持仓无法切换模式，使用双向持仓（保守策略）', { attempt });
-          return 'double_hold';
-        }
-        // 502 等网络错误，重试
-        if (attempt < 3) {
-          logger.warn('模拟盘设置持仓模式网络错误，重试', { attempt, error: errMsg });
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-        // 重试耗尽，默认双向持仓（更安全）
-        logger.warn('模拟盘持仓模式检测失败，默认双向持仓', { error: errMsg });
-        return 'double_hold';
-      }
+  async getPositions(productType: ProductType, marginCoin = 'USDT'): Promise<FuturesPosition[]> {
+    const response = await this.client.get<FuturesPosition[]>(
+      '/api/v2/mix/position/all-position',
+      { productType, marginCoin }
+    );
+    return response.data || [];
+  }
+
+  /**
+   * 通过 position-mode API 查询持仓模式
+   */
+  private async queryPositionModeAPI(productType: ProductType): Promise<HoldMode> {
+    const response = await this.client.get<{ posMode: string }>(
+      '/api/v2/mix/account/position-mode',
+      { productType }
+    );
+    const posMode = response.data?.posMode;
+    logger.info('持仓模式 API 返回', { posMode, rawData: JSON.stringify(response.data) });
+    if (posMode === 'hedge_mode') return 'double_hold';
+    if (posMode === 'one_way_mode') return 'single_hold';
+    // 兼容旧字段格式
+    const raw = response.data as unknown as Record<string, string>;
+    if (raw?.holdMode === 'double_hold') return 'double_hold';
+    // 无法识别 → 抛出让上层 fallback
+    throw new Error(`无法识别 posMode: ${posMode}`);
+  }
+
+  /**
+   * 从持仓列表推断持仓模式
+   * holdSide='net' → one_way_mode（单向持仓）
+   * holdSide='long'/'short' → hedge_mode（双向持仓）
+   */
+  private async inferHoldModeFromPositions(productType: ProductType): Promise<HoldMode> {
+    const positions = await this.getPositions(productType);
+    if (positions.length === 0) {
+      // 无持仓，无法推断 → 抛出让上层使用默认值
+      throw new Error('无持仓数据，无法推断持仓模式');
     }
-    return 'double_hold';
+
+    // 检查 posMode 字段（部分 API 返回中包含）
+    const firstPosMode = positions[0].posMode;
+    if (firstPosMode === 'one_way_mode') {
+      logger.info('从持仓列表 posMode 字段推断：单向持仓', { posMode: firstPosMode });
+      return 'single_hold';
+    }
+    if (firstPosMode === 'hedge_mode') {
+      logger.info('从持仓列表 posMode 字段推断：双向持仓', { posMode: firstPosMode });
+      return 'double_hold';
+    }
+
+    // 从 holdSide 推断
+    const holdSides = positions.map(p => p.holdSide);
+    if (holdSides.includes('net')) {
+      logger.info('从持仓列表 holdSide 推断：单向持仓', { holdSides });
+      return 'single_hold';
+    }
+    if (holdSides.includes('long') || holdSides.includes('short')) {
+      logger.info('从持仓列表 holdSide 推断：双向持仓', { holdSides });
+      return 'double_hold';
+    }
+
+    throw new Error(`无法从持仓 holdSide 推断持仓模式: ${JSON.stringify(holdSides)}`);
   }
 
   /**

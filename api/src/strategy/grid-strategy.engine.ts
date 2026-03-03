@@ -788,6 +788,34 @@ export class GridStrategyEngine implements IStrategy {
     // 等待仓位在交易所结算
     await this.sleep(800);
 
+    // 卖单前检查持仓是否已到位，同时从持仓 holdSide 验证/纠正 holdMode
+    if (config.tradingType === 'futures' && config.productType) {
+      try {
+        const futuresAccountSvc = new FuturesAccountService();
+        const positions = await futuresAccountSvc.getPositions(
+          config.productType, config.marginCoin || 'USDT'
+        );
+        const pos = positions.find(
+          p => p.symbol === config.symbol && parseFloat(p.total) > 0
+        );
+        if (!pos) {
+          logger.warn('卖单前检查：持仓未到位，额外等待', { symbol: config.symbol, levelIndex: buyLevel.index });
+          await this.sleep(3000);
+        } else {
+          // 从持仓 holdSide 验证/纠正 holdMode
+          const inferredMode: HoldMode = pos.holdSide === 'net' ? 'single_hold' : 'double_hold';
+          if (inferredMode !== this.holdMode) {
+            logger.info('从持仓列表更新持仓模式', {
+              old: this.holdMode, new: inferredMode, holdSide: pos.holdSide,
+            });
+            this.holdMode = inferredMode;
+          }
+        }
+      } catch (error) {
+        logger.warn('卖单前持仓检查失败，继续使用已知 holdMode', { error: String(error) });
+      }
+    }
+
     const clientOid = `grid_${config.symbol}_sell_${buyLevel.index}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const maxRetries = 3;

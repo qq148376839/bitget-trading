@@ -107,7 +107,12 @@ export class FuturesAccountService {
    * holdSide='long'/'short' → hedge_mode（双向持仓）
    */
   private async inferHoldModeFromPositions(productType: ProductType): Promise<HoldMode> {
-    const positions = await this.getPositions(productType);
+    // 不传 marginCoin，获取所有币种持仓，推断更可靠
+    const response = await this.client.get<FuturesPosition[]>(
+      '/api/v2/mix/position/all-position',
+      { productType }
+    );
+    const positions = response.data || [];
     if (positions.length === 0) {
       // 无持仓，无法推断 → 抛出让上层使用默认值
       throw new Error('无持仓数据，无法推断持仓模式');

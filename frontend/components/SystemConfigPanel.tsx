@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Card, Form, Input, Button, Space, Switch, App, Descriptions, Tag } from 'antd';
-import { SaveOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import { SaveOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, LockOutlined } from '@ant-design/icons';
 import { api } from '@/lib/api';
 
 interface Props {
@@ -57,6 +57,23 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
   };
 
   const hasConfig = (key: string) => configs.some(c => c.key === key);
+
+  /** 已配置的加密字段标签 */
+  const configuredLabel = (key: string) =>
+    hasConfig(key) ? (
+      <Tag icon={<LockOutlined />} color="green" style={{ marginLeft: 8, fontWeight: 'normal' }}>
+        已配置
+      </Tag>
+    ) : null;
+
+  // configs 异步加载后同步表单值（initialValues 只在首次渲染生效）
+  useEffect(() => {
+    if (configs.length > 0) {
+      form.setFieldsValue({
+        simulated: getConfigValue('BITGET_SIMULATED') === '1',
+      });
+    }
+  }, [configs]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async (values: Record<string, string>) => {
     setSaving(true);
@@ -113,7 +130,7 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
       >
         <Form.Item
           name="apiKey"
-          label="API Key"
+          label={<span>API Key{configuredLabel('BITGET_API_KEY')}</span>}
           rules={[{ required: !hasConfig('BITGET_API_KEY'), message: '请输入 API Key' }]}
         >
           <Input.Password
@@ -122,7 +139,7 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
         </Form.Item>
         <Form.Item
           name="secretKey"
-          label="Secret Key"
+          label={<span>Secret Key{configuredLabel('BITGET_SECRET_KEY')}</span>}
           rules={[{ required: !hasConfig('BITGET_SECRET_KEY'), message: '请输入 Secret Key' }]}
         >
           <Input.Password
@@ -131,7 +148,7 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
         </Form.Item>
         <Form.Item
           name="passphrase"
-          label="Passphrase"
+          label={<span>Passphrase{configuredLabel('BITGET_PASSPHRASE')}</span>}
           rules={[{ required: !hasConfig('BITGET_PASSPHRASE'), message: '请输入 Passphrase' }]}
         >
           <Input.Password

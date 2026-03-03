@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-03-03
+### 持仓模式检测重写
+**fix**: 统一 API 查询 + 持仓列表推断 + 卖单前验证
+
+1. 删除 `detectSimulatedHoldMode()`（参数缺失 symbol/marginCoin，基于错误假设）
+2. `getHoldMode()` 新流程：position-mode API → 持仓列表 holdSide/posMode 推断 → 默认 double_hold
+3. 新增 `getPositions()` 公开方法（查询 all-position API）
+4. 剥头皮/网格引擎：卖单前检查持仓到位 + 从 holdSide 实时纠正 holdMode
+5. 新增 `FuturesPosition` 类型定义
+
+**文档**: `docs/fixes/260303-持仓模式检测重写.md`
+
+---
+
 ## 2026-03-02
 ### v3.0 系统全面升级 — 认证 + 日志 + 智能策略 + UTA 兼容
 **feat**: 4 大 Phase 全面升级，NAS 稳定运行优化

@@ -5,6 +5,7 @@
 
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import crypto from 'crypto';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { getBitgetConfig, BitgetConfig } from '../config/bitget';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
@@ -25,13 +26,22 @@ export class BitgetClientService {
 
   private constructor() {
     this.config = getBitgetConfig();
-    this.client = axios.create({
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const axiosConfig: AxiosRequestConfig = {
       baseURL: this.config.baseUrl,
       timeout: 10000,
       headers: {
         'Content-Type': 'application/json',
       },
-    });
+    };
+    if (proxyUrl) {
+      const agent = new HttpsProxyAgent(proxyUrl);
+      axiosConfig.httpAgent = agent;
+      axiosConfig.httpsAgent = agent;
+      axiosConfig.proxy = false; // 禁用 axios 内置代理，使用 agent
+      logger.info('已配置 HTTPS 代理', { proxyUrl });
+    }
+    this.client = axios.create(axiosConfig);
   }
 
   static getInstance(): BitgetClientService {

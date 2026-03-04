@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Layout, Row, Col, Typography, Tag, Space, Button, Dropdown } from 'antd';
+import { Layout, Row, Col, Typography, Tag, Space, Button, Dropdown, Collapse } from 'antd';
 import {
   SettingOutlined,
   LogoutOutlined,
@@ -77,7 +77,13 @@ function DashboardContent() {
             <PolymarketSignalPanel />
           </Col>
           <Col span={24}>
-            <ConfigWizard />
+            <Collapse
+              items={[{
+                key: 'advanced-config',
+                label: '高级配置',
+                children: <ConfigWizard />,
+              }]}
+            />
           </Col>
         </Row>
       </Content>

@@ -24,6 +24,7 @@ export interface AutoCalcResult {
   fullConfig: BaseStrategyConfig;
   derivations: Derivation[];
   bounds: ParameterBounds;
+  availableBalance?: string;
 }
 
 export interface SimpleConfigInput {

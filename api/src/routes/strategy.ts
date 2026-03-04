@@ -53,6 +53,27 @@ router.post('/stop', async (req: Request, res: Response, next: NextFunction) => 
 });
 
 /**
+ * POST /api/strategy/restart
+ * 重启策略（stop + start with new config）
+ */
+router.post('/restart', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const overrides = req.body as Partial<AnyStrategyConfig> | undefined;
+    const manager = StrategyManager.getInstance();
+    await manager.stopActive();
+    await manager.createAndStart(overrides);
+
+    res.json({
+      success: true,
+      message: '策略已重启',
+      data: manager.getState(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /api/strategy/status
  * 获取策略状态
  */

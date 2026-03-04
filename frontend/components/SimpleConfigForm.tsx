@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Steps,
   Form,
@@ -30,13 +30,15 @@ import {
 import TradingPairSelector from './TradingPairSelector';
 import StrategyTypeSelector from './StrategyTypeSelector';
 import { useAutoCalc, type RiskLevel, type SimpleConfigInput } from '@/hooks/useAutoCalc';
-import type { StrategyType, TradingType, StrategyDirection } from '@/lib/types';
+import type { StrategyType, TradingType, StrategyDirection, AnyStrategyConfig } from '@/lib/types';
 
 const { Text, Title } = Typography;
 
 interface SimpleConfigFormProps {
   onStartStrategy?: (config: Record<string, unknown>) => void;
   loading?: boolean;
+  initialConfig?: Partial<AnyStrategyConfig>;
+  compact?: boolean;
 }
 
 const RISK_LEVEL_OPTIONS: Array<{
@@ -71,13 +73,61 @@ const RISK_LEVEL_OPTIONS: Array<{
   },
 ];
 
-export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleConfigFormProps) {
-  const [strategyType, setStrategyType] = useState<StrategyType>('scalping');
-  const [tradingType, setTradingType] = useState<TradingType>('futures');
-  const [symbol, setSymbol] = useState<string>('');
-  const [orderAmountUsdt, setOrderAmountUsdt] = useState<string>('');
-  const [direction, setDirection] = useState<StrategyDirection>('long');
+const AMOUNT_PRESETS = [
+  { label: '自动', value: 'auto' },
+  { label: '1%', value: 0.01 },
+  { label: '2%', value: 0.02 },
+  { label: '5%', value: 0.05 },
+  { label: '10%', value: 0.10 },
+] as const;
+
+function calcAutoAmount(balance: number, minAmount: number, maxAmount: number): number {
+  const targetPercent = balance > 10000 ? 0.005 : balance > 1000 ? 0.01 : 0.02;
+  let amount = Math.floor(balance * targetPercent * 100) / 100;
+  amount = Math.max(amount, minAmount);
+  amount = Math.min(amount, maxAmount);
+  return amount;
+}
+
+export default function SimpleConfigForm({
+  onStartStrategy,
+  loading,
+  initialConfig,
+  compact,
+}: SimpleConfigFormProps) {
+  const [strategyType, setStrategyType] = useState<StrategyType>(
+    initialConfig?.strategyType || 'scalping'
+  );
+  const [tradingType, setTradingType] = useState<TradingType>(
+    initialConfig?.tradingType || 'futures'
+  );
+  const [symbol, setSymbol] = useState<string>(initialConfig?.symbol || '');
+  const [orderAmountUsdt, setOrderAmountUsdt] = useState<string>(
+    initialConfig?.orderAmountUsdt || ''
+  );
+  const [direction, setDirection] = useState<StrategyDirection>(
+    initialConfig?.direction || 'both'
+  );
   const [riskLevel, setRiskLevel] = useState<RiskLevel>('balanced');
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(
+    initialConfig?.orderAmountUsdt ? null : 'auto'
+  );
+
+  const isEditMode = !!initialConfig?.symbol;
+
+  // Sync initialConfig when it changes (e.g. modal reopened with new config)
+  useEffect(() => {
+    if (initialConfig) {
+      if (initialConfig.strategyType) setStrategyType(initialConfig.strategyType);
+      if (initialConfig.tradingType) setTradingType(initialConfig.tradingType);
+      if (initialConfig.symbol) setSymbol(initialConfig.symbol);
+      if (initialConfig.orderAmountUsdt) {
+        setOrderAmountUsdt(initialConfig.orderAmountUsdt);
+        setSelectedPreset(null);
+      }
+      if (initialConfig.direction) setDirection(initialConfig.direction);
+    }
+  }, [initialConfig]);
 
   const autoCalcInput = useMemo<SimpleConfigInput | null>(() => {
     if (!symbol || !orderAmountUsdt) return null;
@@ -92,6 +142,47 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
   }, [strategyType, tradingType, symbol, orderAmountUsdt, direction, riskLevel]);
 
   const { result, loading: calcLoading, error: calcError } = useAutoCalc(autoCalcInput);
+
+  // Available balance from auto-calc result
+  const availableBalance = result?.availableBalance ? parseFloat(result.availableBalance) : null;
+  const bounds = result?.bounds;
+
+  // When balance becomes available and preset is 'auto', calculate auto amount
+  const applyPreset = useCallback(
+    (preset: string | number, balance: number | null) => {
+      if (!balance || balance <= 0) return;
+      const minAmount = bounds?.orderAmountUsdt?.min ?? 5;
+      const maxAmount = bounds?.orderAmountUsdt?.max ?? balance * 0.5;
+
+      if (preset === 'auto') {
+        const amount = calcAutoAmount(balance, minAmount, maxAmount);
+        setOrderAmountUsdt(String(amount));
+      } else if (typeof preset === 'number') {
+        let amount = Math.floor(balance * preset * 100) / 100;
+        amount = Math.max(amount, minAmount);
+        amount = Math.min(amount, maxAmount);
+        setOrderAmountUsdt(String(amount));
+      }
+    },
+    [bounds]
+  );
+
+  // Auto-fill amount when balance first becomes available and 'auto' is selected
+  useEffect(() => {
+    if (selectedPreset === 'auto' && availableBalance && !orderAmountUsdt) {
+      const minAmount = bounds?.orderAmountUsdt?.min ?? 5;
+      const maxAmount = bounds?.orderAmountUsdt?.max ?? availableBalance * 0.5;
+      const amount = calcAutoAmount(availableBalance, minAmount, maxAmount);
+      setOrderAmountUsdt(String(amount));
+    }
+  }, [selectedPreset, availableBalance, bounds, orderAmountUsdt]);
+
+  const handlePresetClick = (preset: typeof AMOUNT_PRESETS[number]) => {
+    setSelectedPreset(String(preset.value));
+    if (availableBalance) {
+      applyPreset(preset.value, availableBalance);
+    }
+  };
 
   const isFormComplete = symbol && orderAmountUsdt && Number(orderAmountUsdt) > 0;
 
@@ -110,17 +201,19 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
 
   return (
     <div>
-      <Steps
-        current={currentStep}
-        size="small"
-        style={{ marginBottom: 24 }}
-        items={[
-          { title: '策略类型' },
-          { title: '交易对' },
-          { title: '参数设置' },
-          { title: '确认启动' },
-        ]}
-      />
+      {!compact && (
+        <Steps
+          current={currentStep}
+          size="small"
+          style={{ marginBottom: 24 }}
+          items={[
+            { title: '策略类型' },
+            { title: '交易对' },
+            { title: '参数设置' },
+            { title: '确认启动' },
+          ]}
+        />
+      )}
 
       {/* Step 1: Strategy Type */}
       <div style={{ marginBottom: 24 }}>
@@ -144,10 +237,11 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
                 value={tradingType}
                 onChange={(e) => {
                   setTradingType(e.target.value as TradingType);
-                  setSymbol(''); // Reset symbol when trading type changes
+                  if (!isEditMode) setSymbol('');
                 }}
                 optionType="button"
                 buttonStyle="solid"
+                disabled={isEditMode}
               >
                 <Radio.Button value="futures">合约</Radio.Button>
                 <Radio.Button value="spot">现货</Radio.Button>
@@ -156,11 +250,15 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
           </Col>
           <Col span={16}>
             <Form.Item label="交易对" style={{ marginBottom: 12 }}>
-              <TradingPairSelector
-                tradingType={tradingType}
-                value={symbol}
-                onChange={setSymbol}
-              />
+              {isEditMode ? (
+                <Input value={symbol} disabled style={{ width: '100%' }} />
+              ) : (
+                <TradingPairSelector
+                  tradingType={tradingType}
+                  value={symbol}
+                  onChange={setSymbol}
+                />
+              )}
             </Form.Item>
           </Col>
         </Row>
@@ -174,21 +272,53 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
           交易参数
         </Title>
         <Row gutter={16}>
-          <Col span={8}>
+          <Col span={tradingType === 'futures' ? 16 : 24}>
             <Form.Item
               label="单笔金额"
               required
               tooltip="每次下单使用的 USDT 金额"
-              style={{ marginBottom: 16 }}
+              style={{ marginBottom: 8 }}
             >
+              {/* Quick select buttons */}
+              <Space size={4} style={{ marginBottom: 8 }}>
+                {AMOUNT_PRESETS.map((preset) => (
+                  <Button
+                    key={String(preset.value)}
+                    size="small"
+                    type={selectedPreset === String(preset.value) ? 'primary' : 'default'}
+                    onClick={() => handlePresetClick(preset)}
+                    disabled={preset.value !== 'auto' && !availableBalance}
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </Space>
               <Input
                 value={orderAmountUsdt}
-                onChange={(e) => setOrderAmountUsdt(e.target.value)}
+                onChange={(e) => {
+                  setOrderAmountUsdt(e.target.value);
+                  setSelectedPreset(null);
+                }}
                 suffix="USDT"
                 placeholder="例如: 10"
                 type="number"
                 min={0}
               />
+              {/* Balance & bounds hint */}
+              <div style={{ marginTop: 4, fontSize: 12, color: '#8c8c8c' }}>
+                {availableBalance !== null && (
+                  <span>
+                    可用余额: <Text strong style={{ fontSize: 12 }}>
+                      {availableBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </Text> USDT
+                  </span>
+                )}
+                {bounds?.orderAmountUsdt && (
+                  <span style={{ marginLeft: availableBalance !== null ? 12 : 0 }}>
+                    范围: {bounds.orderAmountUsdt.min.toFixed(2)} - {bounds.orderAmountUsdt.max.toFixed(2)} USDT
+                  </span>
+                )}
+              </div>
             </Form.Item>
           </Col>
           {tradingType === 'futures' && (
@@ -349,7 +479,7 @@ export default function SimpleConfigForm({ onStartStrategy, loading }: SimpleCon
         disabled={!result || calcLoading}
         block
       >
-        启动策略
+        {isEditMode ? '保存并重启' : '启动策略'}
       </Button>
     </div>
   );

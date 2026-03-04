@@ -58,6 +58,7 @@ export interface AutoCalcResult {
   fullConfig: BaseStrategyConfig;
   derivations: Derivation[];
   bounds: ParameterBounds;
+  availableBalance: string;
 }
 
 export class AutoCalcService {
@@ -311,7 +312,7 @@ export class AutoCalcService {
       riskLevel,
     });
 
-    return { fullConfig, derivations, bounds };
+    return { fullConfig, derivations, bounds, availableBalance: balance };
   }
 
   /**
@@ -489,7 +490,7 @@ export class AutoCalcService {
       riskLevel,
     });
 
-    return { fullConfig, derivations, bounds };
+    return { fullConfig, derivations, bounds, availableBalance: balance };
   }
 
   /**

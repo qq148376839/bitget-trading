@@ -72,6 +72,11 @@ export const api = {
     }),
   stopStrategy: () =>
     request<StrategyState>('/api/strategy/stop', { method: 'POST' }),
+  restartStrategy: (config?: Partial<AnyStrategyConfig>) =>
+    request<StrategyState>('/api/strategy/restart', {
+      method: 'POST',
+      body: JSON.stringify(config || {}),
+    }),
   emergencyStop: () =>
     request<StrategyState>('/api/strategy/emergency-stop', { method: 'POST' }),
   updateConfig: (changes: Partial<AnyStrategyConfig>) =>

@@ -802,11 +802,13 @@ export class GridStrategyEngine implements IStrategy {
           logger.warn('卖单前检查：持仓未到位，额外等待', { symbol: config.symbol, levelIndex: buyLevel.index });
           await this.sleep(3000);
         } else {
-          // 从持仓 holdSide 验证/纠正 holdMode
-          const inferredMode: HoldMode = pos.holdSide === 'net' ? 'single_hold' : 'double_hold';
+          // 从持仓 posMode/holdSide 验证/纠正 holdMode
+          // 注意：one_way_mode 下 Bitget 可能返回 holdSide='long' 而非 'net'，必须优先检查 posMode
+          const inferredMode: HoldMode =
+            pos.posMode === 'one_way_mode' || pos.holdSide === 'net' ? 'single_hold' : 'double_hold';
           if (inferredMode !== this.holdMode) {
             logger.info('从持仓列表更新持仓模式', {
-              old: this.holdMode, new: inferredMode, holdSide: pos.holdSide,
+              old: this.holdMode, new: inferredMode, posMode: pos.posMode, holdSide: pos.holdSide,
             });
             this.holdMode = inferredMode;
           }

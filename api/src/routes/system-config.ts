@@ -99,6 +99,20 @@ router.put('/profile/:profile', async (req: Request, res: Response, next: NextFu
       updatedBy: req.user?.username,
     });
 
+    // 如果保存的是当前活跃 profile，自动刷新运行时凭证
+    const activeProfile = await configService.get('BITGET_ACTIVE_PROFILE');
+    if (activeProfile === profile) {
+      process.env.BITGET_API_KEY = apiKey;
+      process.env.BITGET_SECRET_KEY = secretKey;
+      process.env.BITGET_PASSPHRASE = passphrase;
+      // 同步运行时 key 到 DB
+      await configService.set('BITGET_API_KEY', apiKey, { isEncrypted: true });
+      await configService.set('BITGET_SECRET_KEY', secretKey, { isEncrypted: true });
+      await configService.set('BITGET_PASSPHRASE', passphrase, { isEncrypted: true });
+      clearBitgetConfig();
+      BitgetClientService.clearInstance();
+    }
+
     res.json({ success: true, data: { message: `${profile} 凭证已保存` } });
   } catch (error) {
     next(error);

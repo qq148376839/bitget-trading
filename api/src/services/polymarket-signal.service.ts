@@ -455,39 +455,71 @@ export class PolymarketSignalService {
       this.httpClient = this.createHttpClient();
     }
 
-    // Gamma API 不支持原生全文搜索，需要拉取较大数据集后在服务端过滤
-    // 按交易量降序排列，确保热门市场优先
-    const response = await this.httpClient.get('/markets', {
+    // 使用 Gamma API /search-v2 端点进行全文搜索
+    const response = await this.httpClient.get('/search-v2', {
       params: {
-        _limit: 200,
-        active: true,
-        closed: false,
-        order: 'volumeNum',
-        ascending: false,
+        q: query || '',
+        type: 'events',
+        limit_per_type: '30',
+        sort: 'volume_24hr',
+        events_status: 'active',
       },
       timeout: 15000,
     });
 
-    const allMarkets: PolymarketMarketData[] = Array.isArray(response.data)
-      ? response.data
-      : [];
+    const data = response.data as {
+      events?: Array<{
+        id: string;
+        title: string;
+        markets?: Array<{
+          id: string;
+          condition_id?: string;
+          conditionId?: string;
+          question: string;
+          slug: string;
+          outcomePrices?: string[];
+          outcome_prices?: string;
+          volume_num?: number;
+          active?: boolean;
+        }>;
+      }>;
+    };
 
-    // 服务端按 question 文本过滤
-    const filtered = query
-      ? allMarkets.filter(m => {
-          const q = query.toLowerCase();
-          return m.question.toLowerCase().includes(q)
-            || (m.description && m.description.toLowerCase().includes(q));
-        })
-      : allMarkets;
+    const results: Array<{
+      conditionId: string;
+      question: string;
+      volume: number;
+      active: boolean;
+      outcomePrices: string[];
+    }> = [];
 
-    return filtered.slice(0, 30).map(m => ({
-      conditionId: m.condition_id,
-      question: m.question,
-      volume: m.volume_num || 0,
-      active: m.active,
-      outcomePrices: this.parseOutcomePrices(m.outcome_prices),
-    }));
+    const events = data.events || [];
+    for (const event of events) {
+      const markets = event.markets || [];
+      for (const m of markets) {
+        const conditionId = m.condition_id || m.conditionId || '';
+        if (!conditionId) continue;
+
+        let outcomePrices: string[];
+        if (Array.isArray(m.outcomePrices)) {
+          outcomePrices = m.outcomePrices;
+        } else if (typeof m.outcome_prices === 'string') {
+          outcomePrices = this.parseOutcomePrices(m.outcome_prices);
+        } else {
+          outcomePrices = [];
+        }
+
+        results.push({
+          conditionId,
+          question: m.question,
+          volume: m.volume_num || 0,
+          active: m.active !== false,
+          outcomePrices,
+        });
+      }
+    }
+
+    return results.slice(0, 30);
   }
 
   private parseOutcomePrices(raw: string): string[] {

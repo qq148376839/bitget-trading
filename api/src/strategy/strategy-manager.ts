@@ -12,6 +12,7 @@ import { BaseStrategyConfig, AnyStrategyConfig, StrategyState } from '../types/s
 import { createTradingServices, TradingServices } from '../services/trading-service.factory';
 import { ProductType, MarginMode } from '../types/futures.types';
 import { AppError, ErrorCode } from '../utils/errors';
+import { PolymarketSignalService } from '../services/polymarket-signal.service';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('strategy-manager');
@@ -76,6 +77,16 @@ export class StrategyManager {
     } as BaseStrategyConfig);
 
     this.activeStrategy = strategy;
+
+    // 自动填充 Polymarket 监控列表（后台执行，不阻塞策略启动）
+    const symbol = config?.symbol;
+    if (symbol) {
+      const polyService = PolymarketSignalService.getInstance();
+      polyService.autoPopulateWatchList(symbol).catch(err => {
+        logger.warn('自动填充 Polymarket 监控列表失败', { error: String(err) });
+      });
+    }
+
     return strategy;
   }
 

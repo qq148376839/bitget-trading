@@ -8,6 +8,7 @@ import axios, { AxiosInstance } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { createLogger } from '../utils/logger';
 import {
+  PolymarketCategory,
   PolymarketSignalConfig,
   PolymarketWatchItem,
   PolymarketMarketData,
@@ -29,6 +30,20 @@ const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const MAX_HISTORY_ENTRIES = 720; // 24h at 120s interval
 const ONE_HOUR_MS = 3600_000;
 const ONE_DAY_MS = 86400_000;
+
+/** 币种符号 → 英文全名映射（用于 Polymarket 搜索） */
+const COIN_NAME_MAP: Record<string, string> = {
+  BTC: 'Bitcoin',
+  ETH: 'Ethereum',
+  SOL: 'Solana',
+  XRP: 'Ripple XRP',
+  DOGE: 'Dogecoin',
+  ADA: 'Cardano',
+  AVAX: 'Avalanche',
+  DOT: 'Polkadot',
+  MATIC: 'Polygon',
+  LINK: 'Chainlink',
+};
 
 interface ProbHistoryEntry {
   ts: number;
@@ -520,6 +535,169 @@ export class PolymarketSignalService {
     }
 
     return results.slice(0, 30);
+  }
+
+  // ============================================================
+  // Auto-populate watchlist from strategy symbol
+  // ============================================================
+
+  /**
+   * 根据策略交易标的自动搜索并填充监控列表
+   * 策略启动时调用，全自动无需确认
+   */
+  async autoPopulateWatchList(symbol: string): Promise<number> {
+    const baseCoin = this.extractBaseCoin(symbol);
+    if (!baseCoin) {
+      logger.warn('无法从交易标的提取基础币种', { symbol });
+      return 0;
+    }
+
+    logger.info('自动填充 Polymarket 监控列表', { symbol, baseCoin });
+
+    // 搜索关键词：币种名称 + 常见宏观话题
+    const searchQueries = this.buildSearchQueries(baseCoin);
+    const existingIds = new Set(this.config.watchList.map(w => w.conditionId));
+    const newItems: PolymarketWatchItem[] = [];
+
+    for (const query of searchQueries) {
+      try {
+        const results = await this.searchMarkets(query.keyword);
+        for (const market of results) {
+          if (existingIds.has(market.conditionId)) continue;
+          if (!market.active || market.volume < 1000) continue;
+
+          existingIds.add(market.conditionId);
+          newItems.push({
+            conditionId: market.conditionId,
+            label: market.question.length > 60
+              ? market.question.slice(0, 57) + '...'
+              : market.question,
+            category: query.category,
+            impactDirection: query.impactDirection,
+            weight: query.weight,
+            deltaThresholdPercent: query.deltaThreshold,
+          });
+
+          // 每个搜索词最多取 2 个结果
+          if (newItems.filter(i => i.category === query.category).length >= 2) break;
+        }
+      } catch (err) {
+        logger.warn('自动搜索市场失败', { query: query.keyword, error: String(err) });
+      }
+    }
+
+    // 总数限制 8 个
+    const toAdd = newItems.slice(0, 8 - this.config.watchList.length);
+
+    if (toAdd.length === 0) {
+      logger.info('未找到新的监控市场');
+      return 0;
+    }
+
+    // 更新配置
+    const updatedWatchList = [...this.config.watchList, ...toAdd];
+    this.updateConfig({
+      enabled: true,
+      watchList: updatedWatchList,
+    });
+
+    // 持久化到 DB
+    await this.persistConfig();
+
+    logger.info('自动添加监控市场完成', {
+      addedCount: toAdd.length,
+      totalCount: updatedWatchList.length,
+      markets: toAdd.map(i => i.label),
+    });
+
+    return toAdd.length;
+  }
+
+  /**
+   * 持久化当前配置到 DB
+   */
+  async persistConfig(): Promise<void> {
+    try {
+      const { SystemConfigService } = await import('./system-config.service');
+      const configService = SystemConfigService.getInstance();
+      await configService.set(
+        'polymarket_signal_config',
+        JSON.stringify(this.getConfig()),
+        { description: 'Polymarket 信号配置' }
+      );
+    } catch (err) {
+      logger.warn('持久化 Polymarket 配置失败', { error: String(err) });
+    }
+  }
+
+  private extractBaseCoin(symbol: string): string | null {
+    // BTCUSDT → BTC, ETHUSDT → ETH, SOLUSDT → SOL
+    const match = symbol.match(/^([A-Z]{2,10})(USDT|USDC|USD)$/i);
+    return match ? match[1].toUpperCase() : null;
+  }
+
+  private buildSearchQueries(baseCoin: string): Array<{
+    keyword: string;
+    category: PolymarketCategory;
+    impactDirection: 'bullish' | 'bearish';
+    weight: number;
+    deltaThreshold: number;
+  }> {
+    const coinName = COIN_NAME_MAP[baseCoin] || baseCoin;
+
+    const queries: Array<{
+      keyword: string;
+      category: PolymarketCategory;
+      impactDirection: 'bullish' | 'bearish';
+      weight: number;
+      deltaThreshold: number;
+    }> = [
+      // 币种价格相关
+      {
+        keyword: `${coinName} price`,
+        category: baseCoin === 'BTC' ? 'btc_milestone' : baseCoin === 'ETH' ? 'eth_milestone' : 'custom',
+        impactDirection: 'bullish',
+        weight: 0.3,
+        deltaThreshold: 10,
+      },
+      // 宏观：美联储利率
+      {
+        keyword: 'Fed interest rate',
+        category: 'fed_rate',
+        impactDirection: 'bearish',
+        weight: 0.3,
+        deltaThreshold: 5,
+      },
+      // 监管
+      {
+        keyword: 'crypto regulation',
+        category: 'regulation',
+        impactDirection: 'bearish',
+        weight: 0.2,
+        deltaThreshold: 8,
+      },
+    ];
+
+    // BTC 额外搜索 ETH 相关（跨币种相关性）
+    if (baseCoin === 'BTC') {
+      queries.push({
+        keyword: 'Ethereum ETH price',
+        category: 'eth_milestone',
+        impactDirection: 'bullish',
+        weight: 0.15,
+        deltaThreshold: 10,
+      });
+    } else if (baseCoin === 'ETH') {
+      queries.push({
+        keyword: 'Bitcoin BTC price',
+        category: 'btc_milestone',
+        impactDirection: 'bullish',
+        weight: 0.15,
+        deltaThreshold: 10,
+      });
+    }
+
+    return queries;
   }
 
   private parseOutcomePrices(raw: string): string[] {

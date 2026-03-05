@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Card, Form, Input, Button, Space, Switch, App, Descriptions, Tag } from 'antd';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Card, Form, Input, Button, Space, Switch, App, Descriptions, Tag, Row, Col } from 'antd';
 import { SaveOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, LockOutlined } from '@ant-design/icons';
 import { api } from '@/lib/api';
 
@@ -16,13 +16,17 @@ interface ConfigItem {
   description: string | null;
 }
 
+interface ProfileInfo {
+  activeProfile: string | null;
+  profiles: {
+    simulated: { configured: boolean };
+    real: { configured: boolean };
+  };
+}
+
 export default function SystemConfigPanel({ section }: Props) {
   const { message } = App.useApp();
   const [configs, setConfigs] = useState<ConfigItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [testResult, setTestResult] = useState<{ connected: boolean; message: string } | null>(null);
-  const [testLoading, setTestLoading] = useState(false);
-  const [form] = Form.useForm();
 
   const loadConfigs = async () => {
     try {
@@ -46,52 +50,109 @@ export default function SystemConfigPanel({ section }: Props) {
 
 function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onReload: () => void }) {
   const { message } = App.useApp();
+  const [profileInfo, setProfileInfo] = useState<ProfileInfo | null>(null);
+  const [switching, setSwitching] = useState(false);
+
+  const loadProfileInfo = useCallback(async () => {
+    try {
+      const info = await api.getActiveProfile();
+      setProfileInfo(info);
+    } catch {
+      // Profile API not available, fallback to legacy mode
+    }
+  }, []);
+
+  useEffect(() => {
+    loadProfileInfo();
+  }, [loadProfileInfo]);
+
+  const handleSwitchProfile = async (profile: 'simulated' | 'real') => {
+    setSwitching(true);
+    try {
+      const result = await api.switchProfile(profile);
+      message.success(result.message);
+      await loadProfileInfo();
+      onReload();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '切换失败');
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const activeProfile = profileInfo?.activeProfile as 'simulated' | 'real' | null;
+  const isSimulated = activeProfile === 'simulated' || (!activeProfile && configs.some(c => c.key === 'BITGET_SIMULATED' && c.value === '1'));
+
+  return (
+    <div>
+      {/* 环境切换 */}
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space align="center">
+          <span style={{ fontWeight: 500 }}>当前环境：</span>
+          <Tag color={isSimulated ? 'blue' : 'red'} style={{ fontSize: 14, padding: '2px 12px' }}>
+            {isSimulated ? '模拟盘' : '实盘'}
+          </Tag>
+          <Switch
+            checked={!isSimulated}
+            onChange={(checked) => handleSwitchProfile(checked ? 'real' : 'simulated')}
+            loading={switching}
+            checkedChildren="实盘"
+            unCheckedChildren="模拟盘"
+          />
+        </Space>
+      </Card>
+
+      {/* 双 Profile 凭证卡片 */}
+      <Row gutter={16}>
+        <Col xs={24} lg={12}>
+          <ProfileCard
+            profile="simulated"
+            label="模拟盘"
+            isActive={isSimulated}
+            configured={profileInfo?.profiles.simulated.configured ?? false}
+            onSaved={() => { loadProfileInfo(); onReload(); }}
+          />
+        </Col>
+        <Col xs={24} lg={12}>
+          <ProfileCard
+            profile="real"
+            label="实盘"
+            isActive={!isSimulated}
+            configured={profileInfo?.profiles.real.configured ?? false}
+            onSaved={() => { loadProfileInfo(); onReload(); }}
+          />
+        </Col>
+      </Row>
+    </div>
+  );
+}
+
+function ProfileCard({
+  profile,
+  label,
+  isActive,
+  configured,
+  onSaved,
+}: {
+  profile: 'simulated' | 'real';
+  label: string;
+  isActive: boolean;
+  configured: boolean;
+  onSaved: () => void;
+}) {
+  const { message } = App.useApp();
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ connected: boolean; message: string } | null>(null);
 
-  const getConfigValue = (key: string) => {
-    const c = configs.find(c => c.key === key);
-    return c?.isEncrypted ? '' : (c?.value || '');
-  };
-
-  const hasConfig = (key: string) => configs.some(c => c.key === key);
-
-  /** 已配置的加密字段标签 */
-  const configuredLabel = (key: string) =>
-    hasConfig(key) ? (
-      <Tag icon={<LockOutlined />} color="green" style={{ marginLeft: 8, fontWeight: 'normal' }}>
-        已配置
-      </Tag>
-    ) : null;
-
-  // configs 异步加载后同步表单值（initialValues 只在首次渲染生效）
-  useEffect(() => {
-    if (configs.length > 0) {
-      form.setFieldsValue({
-        simulated: getConfigValue('BITGET_SIMULATED') === '1',
-      });
-    }
-  }, [configs]);  // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleSave = async (values: Record<string, string>) => {
+  const handleSave = async (values: { apiKey: string; secretKey: string; passphrase: string }) => {
     setSaving(true);
     try {
-      const entries = [
-        { key: 'BITGET_API_KEY', value: values.apiKey, encrypted: true, desc: 'Bitget API Key' },
-        { key: 'BITGET_SECRET_KEY', value: values.secretKey, encrypted: true, desc: 'Bitget Secret Key' },
-        { key: 'BITGET_PASSPHRASE', value: values.passphrase, encrypted: true, desc: 'Bitget Passphrase' },
-        { key: 'BITGET_SIMULATED', value: values.simulated ? '1' : '0', encrypted: false, desc: '模拟盘模式' },
-      ];
-
-      for (const entry of entries) {
-        if (entry.value !== undefined && entry.value !== '') {
-          await api.updateSystemConfig(entry.key, entry.value, entry.encrypted, entry.desc);
-        }
-      }
-      message.success('API 凭证已保存');
-      onReload();
+      await api.saveProfileCredentials(profile, values.apiKey, values.secretKey, values.passphrase);
+      message.success(`${label}凭证已保存`);
+      form.resetFields();
+      onSaved();
     } catch (err) {
       message.error(err instanceof Error ? err.message : '保存失败');
     } finally {
@@ -104,11 +165,16 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
     setTestResult(null);
     try {
       const values = form.getFieldsValue();
+      if (!values.apiKey || !values.secretKey || !values.passphrase) {
+        setTestResult({ connected: false, message: '请先填写完整凭证' });
+        setTestLoading(false);
+        return;
+      }
       const result = await api.testBitgetConnection(
         values.apiKey,
         values.secretKey,
         values.passphrase,
-        values.simulated
+        profile === 'simulated'
       );
       setTestResult(result);
     } catch (err) {
@@ -119,44 +185,47 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
   };
 
   return (
-    <Card title="Bitget API 凭证" style={{ marginBottom: 16 }}>
-      <Form
-        form={form}
-        layout="vertical"
-        onFinish={handleSave}
-        initialValues={{
-          simulated: getConfigValue('BITGET_SIMULATED') === '1',
-        }}
-      >
+    <Card
+      title={
+        <Space>
+          <span>{label}凭证</span>
+          {isActive && <Tag color="green">活跃</Tag>}
+          {configured && <Tag icon={<LockOutlined />} color="blue">已配置</Tag>}
+        </Space>
+      }
+      style={{
+        marginBottom: 16,
+        borderColor: isActive ? '#52c41a' : undefined,
+        borderWidth: isActive ? 2 : 1,
+      }}
+    >
+      <Form form={form} layout="vertical" onFinish={handleSave}>
         <Form.Item
           name="apiKey"
-          label={<span>API Key{configuredLabel('BITGET_API_KEY')}</span>}
-          rules={[{ required: !hasConfig('BITGET_API_KEY'), message: '请输入 API Key' }]}
+          label="API Key"
+          rules={[{ required: true, message: '请输入 API Key' }]}
         >
           <Input.Password
-            placeholder={hasConfig('BITGET_API_KEY') ? '已配置（留空保持不变）' : '请输入 API Key'}
+            placeholder={configured ? '已配置（重新输入以更新）' : '请输入 API Key'}
           />
         </Form.Item>
         <Form.Item
           name="secretKey"
-          label={<span>Secret Key{configuredLabel('BITGET_SECRET_KEY')}</span>}
-          rules={[{ required: !hasConfig('BITGET_SECRET_KEY'), message: '请输入 Secret Key' }]}
+          label="Secret Key"
+          rules={[{ required: true, message: '请输入 Secret Key' }]}
         >
           <Input.Password
-            placeholder={hasConfig('BITGET_SECRET_KEY') ? '已配置（留空保持不变）' : '请输入 Secret Key'}
+            placeholder={configured ? '已配置（重新输入以更新）' : '请输入 Secret Key'}
           />
         </Form.Item>
         <Form.Item
           name="passphrase"
-          label={<span>Passphrase{configuredLabel('BITGET_PASSPHRASE')}</span>}
-          rules={[{ required: !hasConfig('BITGET_PASSPHRASE'), message: '请输入 Passphrase' }]}
+          label="Passphrase"
+          rules={[{ required: true, message: '请输入 Passphrase' }]}
         >
           <Input.Password
-            placeholder={hasConfig('BITGET_PASSPHRASE') ? '已配置（留空保持不变）' : '请输入 Passphrase'}
+            placeholder={configured ? '已配置（重新输入以更新）' : '请输入 Passphrase'}
           />
-        </Form.Item>
-        <Form.Item name="simulated" label="模拟盘模式" valuePropName="checked">
-          <Switch checkedChildren="模拟盘" unCheckedChildren="实盘" />
         </Form.Item>
 
         {testResult && (
@@ -194,7 +263,14 @@ function ApiCredentialsForm({ configs, onReload }: { configs: ConfigItem[]; onRe
 
 function SystemConfigList({ configs, onReload }: { configs: ConfigItem[]; onReload: () => void }) {
   const { message } = App.useApp();
-  const systemConfigs = configs.filter(c => !['BITGET_API_KEY', 'BITGET_SECRET_KEY', 'BITGET_PASSPHRASE', 'BITGET_SIMULATED'].includes(c.key));
+  // Filter out all Bitget credential keys (including profile keys)
+  const credentialKeys = [
+    'BITGET_API_KEY', 'BITGET_SECRET_KEY', 'BITGET_PASSPHRASE', 'BITGET_SIMULATED',
+    'BITGET_SIM_API_KEY', 'BITGET_SIM_SECRET_KEY', 'BITGET_SIM_PASSPHRASE',
+    'BITGET_REAL_API_KEY', 'BITGET_REAL_SECRET_KEY', 'BITGET_REAL_PASSPHRASE',
+    'BITGET_ACTIVE_PROFILE',
+  ];
+  const systemConfigs = configs.filter(c => !credentialKeys.includes(c.key));
 
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');

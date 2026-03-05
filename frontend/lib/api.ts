@@ -112,6 +112,26 @@ export const api = {
       method: 'POST',
     }),
 
+  // Profile management
+  getActiveProfile: () =>
+    request<{
+      activeProfile: string | null;
+      profiles: {
+        simulated: { configured: boolean };
+        real: { configured: boolean };
+      };
+    }>('/api/system-config/active-profile'),
+  saveProfileCredentials: (profile: 'simulated' | 'real', apiKey: string, secretKey: string, passphrase: string) =>
+    request<{ message: string }>(`/api/system-config/profile/${profile}`, {
+      method: 'PUT',
+      body: JSON.stringify({ apiKey, secretKey, passphrase }),
+    }),
+  switchProfile: (profile: 'simulated' | 'real') =>
+    request<{ message: string; activeProfile: string }>('/api/system-config/switch-profile', {
+      method: 'POST',
+      body: JSON.stringify({ profile }),
+    }),
+
   // Auth management
   getUsers: () =>
     request<Array<{ id: number; username: string; display_name: string | null; role: string; is_active: boolean; last_login_at: string | null }>>('/api/auth/users'),

@@ -1,11 +1,12 @@
 /**
  * 挂单合并引擎
- * 当挂单数超过阈值时，合并最早的卖单为一个加权平均价的合并单
+ * 当挂单数超过阈值时，合并最早的出场单为一个加权平均价的合并单
+ * 支持方向感知：只合并同方向的出场单
  */
 
 import { TrackedOrder, ScalpingStrategyConfig } from '../types/strategy.types';
 import { IOrderService } from '../services/interfaces/i-order.service';
-import { OrderStateTracker } from './order-state-tracker';
+import { OrderStateTracker, EntryDirection } from './order-state-tracker';
 import { HoldMode } from '../services/futures-account.service';
 import { AppError, ErrorCode } from '../utils/errors';
 import { createLogger } from '../utils/logger';
@@ -48,17 +49,21 @@ export class MergeEngine {
   }
 
   /**
-   * 检查是否需要合并
+   * 检查指定方向是否需要合并
+   * 无方向参数时检查所有出场单（向后兼容）
    */
-  needsMerge(): boolean {
-    const pendingSells = this.tracker.getPendingSellOrders();
-    return pendingSells.length >= this.config.maxPendingOrders;
+  needsMerge(direction?: EntryDirection): boolean {
+    const pendingExits = direction
+      ? this.tracker.getPendingExitOrders(direction)
+      : this.tracker.getPendingSellOrders();
+    return pendingExits.length >= this.config.maxPendingOrders;
   }
 
   /**
-   * 执行合并：取最早 mergeThreshold 个卖单 → 批量撤单 → 加权平均价 → 挂一个合并单
+   * 执行合并（方向感知）
+   * 取指定方向最早 mergeThreshold 个出场单 → 批量撤单 → 加权平均价 → 挂一个合并单
    */
-  async mergeSellOrders(): Promise<MergeResult | null> {
+  async mergeExitOrders(direction?: EntryDirection): Promise<MergeResult | null> {
     if (this.merging) {
       logger.warn('正在合并中，跳过');
       return null;
@@ -67,16 +72,24 @@ export class MergeEngine {
     this.merging = true;
 
     try {
-      const pendingSells = this.tracker.getPendingSellOrders();
-      if (pendingSells.length < this.config.mergeThreshold) {
+      const pendingExits = direction
+        ? this.tracker.getPendingExitOrders(direction)
+        : this.tracker.getPendingSellOrders();
+      if (pendingExits.length < this.config.mergeThreshold) {
         return null;
       }
 
-      // 取最早的 mergeThreshold 个卖单
-      const toMerge = pendingSells.slice(0, this.config.mergeThreshold);
+      const toMerge = pendingExits.slice(0, this.config.mergeThreshold);
 
-      logger.info('开始合并卖单', {
+      // 从被合并订单推断方向和出场 side
+      const mergeDirection: EntryDirection = direction
+        || (toMerge[0].direction === 'short' ? 'short' : 'long');
+      const exitSide = mergeDirection === 'short' ? 'buy' : 'sell';
+
+      logger.info('开始合并出场单', {
         count: toMerge.length,
+        direction: mergeDirection,
+        exitSide,
         firstOrderId: toMerge[0].orderId,
         lastOrderId: toMerge[toMerge.length - 1].orderId,
       });
@@ -92,11 +105,10 @@ export class MergeEngine {
       }
       const avgPrice = totalSize > 0 ? totalValue / totalSize : 0;
 
-      // 按精度截断
       const avgPriceStr = avgPrice.toFixed(this.config.pricePrecision);
       const totalSizeStr = totalSize.toFixed(this.config.sizePrecision);
 
-      // 批量撤单（每批最多 50 单）
+      // 批量撤单
       const orderIds = toMerge.map(o => o.orderId);
       const cancelledIds: string[] = [];
 
@@ -126,12 +138,12 @@ export class MergeEngine {
         );
       }
 
-      // 挂合并后的卖单
-      const clientOid = `scalp_${this.config.symbol}_merge_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      // 挂合并后的出场单
+      const clientOid = `scalp_${this.config.symbol}_${mergeDirection}_merge_${exitSide}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const placeResult = await this.orderService.placeOrder({
         symbol: this.config.symbol,
         size: totalSizeStr,
-        side: 'sell',
+        side: exitSide,
         orderType: 'limit',
         price: avgPriceStr,
         force: 'post_only',
@@ -143,18 +155,20 @@ export class MergeEngine {
       this.tracker.addOrder({
         orderId: placeResult.orderId,
         clientOid,
-        side: 'sell',
+        side: exitSide,
         price: avgPriceStr,
         size: totalSizeStr,
         status: 'pending',
         linkedOrderId: null,
-        direction: this.config.direction || 'long',
+        direction: mergeDirection,
+        orderRole: 'exit',
         createdAt: Date.now(),
         filledAt: null,
       });
 
-      logger.info('卖单合并完成', {
+      logger.info('出场单合并完成', {
         mergedCount: cancelledIds.length,
+        direction: mergeDirection,
         newOrderId: placeResult.orderId,
         avgPrice: avgPriceStr,
         totalSize: totalSizeStr,
@@ -178,5 +192,12 @@ export class MergeEngine {
     } finally {
       this.merging = false;
     }
+  }
+
+  /**
+   * 向后兼容：mergeSellOrders
+   */
+  async mergeSellOrders(): Promise<MergeResult | null> {
+    return this.mergeExitOrders();
   }
 }

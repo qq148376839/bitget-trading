@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Row, Col, Card, Statistic } from 'antd';
+import { Row, Col, Card, Statistic, Tooltip } from 'antd';
 import {
   ArrowUpOutlined,
   ArrowDownOutlined,
@@ -22,6 +22,20 @@ export default function MetricsCards() {
   const realizedPnl = parseFloat(pnl?.realizedPnl || '0');
   const unrealizedPnl = parseFloat(status?.unrealizedPnl || '0');
   const dailyPnl = parseFloat(pnl?.dailyPnl || '0');
+
+  const isBidirectional = status?.config?.direction === 'both';
+  const positionByDir = status?.positionUsdtByDirection;
+  const pendingExitByDir = status?.pendingExitCounts;
+
+  // 持仓 USDT tooltip
+  const positionTooltip = isBidirectional && positionByDir
+    ? `多: ${positionByDir.long || '0'} / 空: ${positionByDir.short || '0'}`
+    : undefined;
+
+  // 挂单数 tooltip
+  const pendingTooltip = isBidirectional && pendingExitByDir
+    ? `多: ${pendingExitByDir.long || 0} / 空: ${pendingExitByDir.short || 0}`
+    : undefined;
 
   return (
     <>
@@ -95,21 +109,25 @@ export default function MetricsCards() {
         </Col>
         <Col xs={12} sm={6} md={3}>
           <Card size="small">
-            <Statistic
-              title="持仓 USDT"
-              value={status?.totalPositionUsdt || '0'}
-              precision={2}
-              prefix={<WalletOutlined />}
-            />
+            <Tooltip title={positionTooltip}>
+              <Statistic
+                title={isBidirectional ? '持仓 USDT (多/空)' : '持仓 USDT'}
+                value={status?.totalPositionUsdt || '0'}
+                precision={2}
+                prefix={<WalletOutlined />}
+              />
+            </Tooltip>
           </Card>
         </Col>
         <Col xs={12} sm={6} md={2}>
           <Card size="small">
-            <Statistic
-              title="挂卖单数"
-              value={status?.pendingSellCount || 0}
-              prefix={<OrderedListOutlined />}
-            />
+            <Tooltip title={pendingTooltip}>
+              <Statistic
+                title={isBidirectional ? '出场挂单 (多/空)' : '挂卖单数'}
+                value={status?.pendingSellCount || 0}
+                prefix={<OrderedListOutlined />}
+              />
+            </Tooltip>
           </Card>
         </Col>
       </Row>

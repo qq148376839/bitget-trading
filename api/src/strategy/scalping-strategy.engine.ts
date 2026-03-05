@@ -1,17 +1,18 @@
 /**
  * 剥头皮策略引擎
- * 状态机 + 双循环架构
+ * 状态机 + 双循环架构，支持单向/双向交易
  *
  * Loop A — 盘口追踪（每 pollIntervalMs）:
- *   1. 获取深度，提取 bid1
- *   2. bid1 变化 → 撤旧买单，挂新买单
- *   3. 无买单 → 在 bid1 挂 post_only 限价买
+ *   对每个活跃方向 (long / short / both):
+ *   1. 获取参考价格（long→bid1, short→ask1）
+ *   2. 价格偏离 → 撤旧入场单，挂新入场单
+ *   3. 无入场单 → 挂 post_only 限价入场
  *
  * Loop B — 成交检测（每 orderCheckIntervalMs）:
  *   1. 查询交易所挂单列表
  *   2. 对比本地状态，发现已成交
- *   3. 买单成交 → 立刻挂卖单（买价 + priceSpread）
- *   4. 卖单成交 → 计算 PnL
+ *   3. 入场成交 → 挂出场单（long: 买价+spread, short: 卖价-spread）
+ *   4. 出场成交 → 计算 PnL
  *   5. 挂单数 >= maxPendingOrders → 触发合并
  */
 
@@ -23,7 +24,7 @@ import { TradingServices } from '../services/trading-service.factory';
 import { ContractSpecService } from '../services/contract-spec.service';
 import { FuturesAccountService, HoldMode } from '../services/futures-account.service';
 import { StrategyPersistenceService } from '../services/strategy-persistence.service';
-import { OrderStateTracker } from './order-state-tracker';
+import { OrderStateTracker, EntryDirection } from './order-state-tracker';
 import { RiskController } from './risk-controller';
 import { MergeEngine } from './merge-engine';
 import { StrategyConfigManager } from './strategy-config.manager';
@@ -70,7 +71,11 @@ export class ScalpingStrategyEngine implements IStrategy {
 
   private loopATimer: ReturnType<typeof setTimeout> | null = null;
   private loopBTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastBidPrice: string | null = null;
+  // Per-direction tracking prices: long→bid1, short→ask1
+  private lastTrackingPrice: Map<EntryDirection, string | null> = new Map([
+    ['long', null],
+    ['short', null],
+  ]);
   private consecutiveErrors = 0;
   private startedAt: number | null = null;
   private tradeCount = 0;
@@ -84,14 +89,21 @@ export class ScalpingStrategyEngine implements IStrategy {
   private configLoaded = false;
 
   private candleDataService: CandleDataService | null = null;
-  private lastDynamicSpread: string | null = null; // 缓存最近的动态价差
+  private lastDynamicSpread: string | null = null;
 
   private events: StrategyEvent[] = [];
   private maxEvents = 1000;
-  private lastBuyCancelledAt = 0; // 上次买单被交易所撤销的时间（用于防止 post_only 快速循环）
-  private holdMode: HoldMode = 'double_hold'; // 持仓模式：single_hold=单向, double_hold=双向
-  private consecutivePostOnlyCancels = 0; // 连续 post_only 被撤次数（用于自适应调整）
-  private loopCounter = 0; // 心跳计数器
+  // Per-direction post_only tracking
+  private lastEntryCancelledAt: Map<EntryDirection, number> = new Map([
+    ['long', 0],
+    ['short', 0],
+  ]);
+  private holdMode: HoldMode = 'double_hold';
+  private consecutivePostOnlyCancels: Map<EntryDirection, number> = new Map([
+    ['long', 0],
+    ['short', 0],
+  ]);
+  private loopCounter = 0;
 
   constructor(services: TradingServices, instanceId = 'default') {
     this.orderService = services.orderService;
@@ -109,7 +121,6 @@ export class ScalpingStrategyEngine implements IStrategy {
     try {
       const config = await this.persistenceService.loadActiveConfig();
       if (config && !this.configLoaded) {
-        // Ensure backwards compatibility: old configs without strategyType/tradingType
         this.lastConfig = {
           ...DEFAULT_SCALPING_CONFIG,
           ...config,
@@ -123,6 +134,16 @@ export class ScalpingStrategyEngine implements IStrategy {
     } catch (error) {
       logger.warn('加载上次配置失败', { error: String(error) });
     }
+  }
+
+  /**
+   * 获取当前配置的活跃方向列表
+   */
+  private getActiveDirections(config: ScalpingStrategyConfig): EntryDirection[] {
+    const dir = config.direction || 'long';
+    if (dir === 'both') return ['long', 'short'];
+    if (dir === 'short') return ['short'];
+    return ['long'];
   }
 
   /**
@@ -142,15 +163,12 @@ export class ScalpingStrategyEngine implements IStrategy {
     logger.info('策略启动中...');
 
     try {
-      // 初始化配置：优先使用 overrides，其次 DB 恢复的上次配置
-      // 注意：如果交易类型变更了（如 futures→spot），不要继承旧配置中的合约参数
       const newTradingType = overrides?.tradingType || this.lastConfig.tradingType;
       const tradingTypeChanged = this.configLoaded && this.lastConfig.tradingType !== newTradingType;
       const baseOverrides = this.configLoaded
         ? { ...this.lastConfig, ...overrides }
         : overrides;
       if (tradingTypeChanged && newTradingType === 'spot') {
-        // 切换到现货时清除合约专用参数，避免恢复错误的 pending 订单
         delete (baseOverrides as Record<string, unknown>).productType;
         delete (baseOverrides as Record<string, unknown>).marginMode;
       }
@@ -177,13 +195,11 @@ export class ScalpingStrategyEngine implements IStrategy {
             takerFeeRate: this.contractSpec.takerFeeRate,
           });
 
-          // 自动覆盖精度配置
           this.configManager.update({
             pricePrecision: this.contractSpec.pricePlace,
             sizePrecision: this.contractSpec.volumePlace,
           });
 
-          // 手续费覆盖检查
           this.checkFeeCoverage(config, this.contractSpec);
         } catch (error) {
           logger.warn('获取合约规格失败，使用手动配置的精度', { error: String(error) });
@@ -197,8 +213,6 @@ export class ScalpingStrategyEngine implements IStrategy {
           this.holdMode = await accountService.getHoldMode(config.productType);
           logger.info('持仓模式检测', { holdMode: this.holdMode });
         } catch (error) {
-          // getHoldMode 内部已 catch 并返回默认值，此分支极少执行
-          // 统一默认双向持仓（确保 tradeSide 始终发送，避免 40774 错误）
           this.holdMode = 'double_hold';
           logger.warn('持仓模式检测失败，默认双向持仓', { error: String(error), fallback: this.holdMode });
         }
@@ -217,7 +231,12 @@ export class ScalpingStrategyEngine implements IStrategy {
       this.riskController = new RiskController(finalConfig, initialEquity);
       this.mergeEngine = new MergeEngine(this.orderService, this.tracker, finalConfig, this.holdMode);
       this.tracker.clear();
-      this.lastBidPrice = null;
+      this.lastTrackingPrice.set('long', null);
+      this.lastTrackingPrice.set('short', null);
+      this.lastEntryCancelledAt.set('long', 0);
+      this.lastEntryCancelledAt.set('short', 0);
+      this.consecutivePostOnlyCancels.set('long', 0);
+      this.consecutivePostOnlyCancels.set('short', 0);
       this.consecutiveErrors = 0;
       this.startedAt = Date.now();
       this.tradeCount = 0;
@@ -240,7 +259,6 @@ export class ScalpingStrategyEngine implements IStrategy {
       }
 
       this.status = 'RUNNING';
-      // 保存配置到 DB 并缓存
       this.lastConfig = this.configManager.getScalpingConfig();
       this.configLoaded = true;
       this.persistenceService.saveActiveConfig(this.lastConfig);
@@ -284,7 +302,6 @@ export class ScalpingStrategyEngine implements IStrategy {
     this.status = 'STOPPING';
     logger.info('策略停止中...');
 
-    // 停止循环
     if (this.loopATimer) {
       clearTimeout(this.loopATimer);
       this.loopATimer = null;
@@ -294,18 +311,22 @@ export class ScalpingStrategyEngine implements IStrategy {
       this.loopBTimer = null;
     }
 
-    // 撤销活跃买单
-    const activeBuy = this.tracker.getActiveBuyOrder();
-    if (activeBuy && this.configManager) {
-      try {
-        const config = this.configManager.getScalpingConfig();
-        await this.orderService.cancelOrder({
-          symbol: config.symbol,
-          orderId: activeBuy.orderId,
-        });
-        this.tracker.markCancelled(activeBuy.orderId);
-      } catch (error) {
-        logger.warn('停止时撤买单失败', { error: String(error) });
+    // 撤销所有方向的活跃入场单
+    if (this.configManager) {
+      const config = this.configManager.getScalpingConfig();
+      for (const dir of this.getActiveDirections(config)) {
+        const activeEntry = this.tracker.getActiveEntryOrder(dir);
+        if (activeEntry) {
+          try {
+            await this.orderService.cancelOrder({
+              symbol: config.symbol,
+              orderId: activeEntry.orderId,
+            });
+            this.tracker.markCancelled(activeEntry.orderId);
+          } catch (error) {
+            logger.warn(`停止时撤 ${dir} 入场单失败`, { error: String(error) });
+          }
+        }
       }
     }
 
@@ -325,7 +346,6 @@ export class ScalpingStrategyEngine implements IStrategy {
     logger.warn('紧急停止触发！');
     this.emitEvent('EMERGENCY_STOP', {});
 
-    // 先停循环
     if (this.loopATimer) {
       clearTimeout(this.loopATimer);
       this.loopATimer = null;
@@ -339,7 +359,6 @@ export class ScalpingStrategyEngine implements IStrategy {
       const config = this.configManager.getScalpingConfig();
       const allPending = this.tracker.getAllOrders().filter(o => o.status === 'pending');
 
-      // 批量撤单
       const orderIds = allPending.map(o => o.orderId);
       for (let i = 0; i < orderIds.length; i += 50) {
         const batch = orderIds.slice(i, i + 50);
@@ -378,7 +397,6 @@ export class ScalpingStrategyEngine implements IStrategy {
       return scalpingConfig;
     }
 
-    // 停止状态
     const tempManager = new StrategyConfigManager({ ...this.lastConfig, ...changes });
     const newConfig = tempManager.getScalpingConfig();
     this.lastConfig = newConfig;
@@ -393,11 +411,25 @@ export class ScalpingStrategyEngine implements IStrategy {
   }
 
   /**
-   * 获取策略状态
+   * 获取策略状态（含 per-direction 信息）
    */
   getState(): StrategyState {
     const config = this.configManager?.getScalpingConfig() || this.lastConfig;
     const riskStats = this.riskController?.getStats();
+    const directions = this.getActiveDirections(config);
+
+    // Per-direction state
+    const activeEntryOrders: Record<string, string | null> = {};
+    const lastTrackingPrices: Record<string, string | null> = {};
+    const pendingExitCounts: Record<string, number> = {};
+    const positionUsdtByDirection: Record<string, string> = {};
+
+    for (const dir of directions) {
+      activeEntryOrders[dir] = this.tracker.getActiveEntryOrderId(dir);
+      lastTrackingPrices[dir] = this.lastTrackingPrice.get(dir) || null;
+      pendingExitCounts[dir] = this.tracker.getPendingExitOrders(dir).length;
+      positionUsdtByDirection[dir] = this.tracker.getTotalPositionUsdtByDirection(dir);
+    }
 
     return {
       status: this.status,
@@ -405,9 +437,10 @@ export class ScalpingStrategyEngine implements IStrategy {
       tradingType: config.tradingType,
       instanceId: this.instanceId,
       config,
+      // Legacy fields (backward compatible — use long direction or first available)
       activeBuyOrderId: this.tracker.getActiveBuyOrderId(),
-      lastBidPrice: this.lastBidPrice,
-      pendingSellCount: this.tracker.getPendingSellOrders().length,
+      lastBidPrice: this.lastTrackingPrice.get('long') || null,
+      pendingSellCount: this.tracker.getPendingExitOrders().length,
       totalPositionUsdt: this.tracker.getTotalPositionUsdt(),
       spotAvailableUsdt: '0',
       futuresAvailableUsdt: '0',
@@ -419,6 +452,11 @@ export class ScalpingStrategyEngine implements IStrategy {
       lastError: null,
       startedAt: this.startedAt,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
+      // Per-direction state
+      activeEntryOrders,
+      lastTrackingPrices,
+      pendingExitCounts,
+      positionUsdtByDirection,
     };
   }
 
@@ -446,7 +484,7 @@ export class ScalpingStrategyEngine implements IStrategy {
   }
 
   // ============================================================
-  // Loop A: 盘口追踪
+  // Loop A: 盘口追踪（per-direction）
   // ============================================================
 
   private scheduleLoopA(): void {
@@ -460,8 +498,9 @@ export class ScalpingStrategyEngine implements IStrategy {
 
     try {
       const config = this.configManager!.getScalpingConfig();
+      const directions = this.getActiveDirections(config);
 
-      // 风控检查
+      // 风控检查（共享资金池）
       const positionUsdt = parseFloat(this.tracker.getTotalPositionUsdt());
       const riskCheck = this.riskController!.checkCanTrade(positionUsdt);
       if (!riskCheck.canTrade) {
@@ -470,82 +509,9 @@ export class ScalpingStrategyEngine implements IStrategy {
         return;
       }
 
-      // 获取盘口 bid1
-      const bid1 = await this.marketDataService.getBestBid(config.symbol);
-      const bid1Num = parseFloat(bid1);
-      const spread = parseFloat(config.priceSpread);
-      this.lastBidPrice = bid1;
-
-      const activeBuy = this.tracker.getActiveBuyOrder();
-
-      if (activeBuy && activeBuy.status === 'pending') {
-        const orderPrice = parseFloat(activeBuy.price);
-        const orderAge = Date.now() - activeBuy.createdAt;
-
-        const MIN_ORDER_LIFETIME_MS = 5000;
-        // 挂单刷新阈值：跟 tick 偏移挂钩而非 priceSpread
-        // tickSize * adaptiveOffset * 3 ≈ 几美元级别，确保紧跟盘口
-        const tickSize = Math.pow(10, -config.pricePrecision);
-        const adaptiveOffset = Math.min(2 + this.consecutivePostOnlyCancels, 10);
-        const refreshThreshold = Math.max(tickSize * adaptiveOffset * 3, spread * 0.1);
-        const overpaying = orderPrice > bid1Num + refreshThreshold;
-        const tooFarBelowBid = bid1Num - orderPrice > refreshThreshold;
-
-        if (orderAge >= MIN_ORDER_LIFETIME_MS && (overpaying || tooFarBelowBid)) {
-          logger.info('刷新买单（价格偏离）', {
-            orderId: activeBuy.orderId,
-            orderPrice: activeBuy.price,
-            bid1,
-            priceDiff: (bid1Num - orderPrice).toFixed(1),
-            refreshThreshold: refreshThreshold.toFixed(1),
-            reason: overpaying ? 'overpaying' : 'too_far_below_bid',
-          });
-          try {
-            await this.orderService.cancelOrder({
-              symbol: config.symbol,
-              orderId: activeBuy.orderId,
-            });
-            this.tracker.markCancelled(activeBuy.orderId);
-            this.emitEvent('BUY_ORDER_CANCELLED', {
-              orderId: activeBuy.orderId,
-              oldPrice: activeBuy.price,
-              reason: overpaying ? 'overpaying' : 'too_far_below_bid',
-              priceDiff: (orderPrice - bid1Num).toFixed(2),
-            });
-          } catch (error) {
-            this.tracker.clearActiveBuy();
-            logger.debug('撤旧买单失败（可能已成交或已撤销）', { orderId: activeBuy.orderId });
-          }
-          await this.placeBuyOrder(bid1, config);
-        } else {
-          // 每 30 轮打印一次心跳日志（约 15 秒），确认策略在运行
-          this.loopCounter++;
-          if (this.loopCounter % 30 === 0) {
-            logger.info('心跳：等待买单成交', {
-              orderId: activeBuy.orderId,
-              orderPrice: activeBuy.price,
-              bid1,
-              priceDiff: (bid1Num - orderPrice).toFixed(1),
-              orderAge: `${(orderAge / 1000).toFixed(0)}s`,
-              refreshThreshold: refreshThreshold.toFixed(1),
-              pendingSells: this.tracker.getPendingSellOrders().length,
-              totalPositionUsdt: this.tracker.getTotalPositionUsdt(),
-              realizedPnl: this.realizedPnl.toFixed(4),
-              tradeCount: this.tradeCount,
-              dynamicSpread: this.lastDynamicSpread,
-            });
-          }
-        }
-      } else {
-        // 防止 post_only 被交易所撤销后立即重新下单造成快速循环
-        const timeSinceLastCancel = Date.now() - this.lastBuyCancelledAt;
-        if (this.lastBuyCancelledAt > 0 && timeSinceLastCancel < POST_ONLY_CANCEL_COOLDOWN_MS) {
-          logger.debug('post_only 冷却中，跳过本轮挂单', {
-            cooldownRemaining: POST_ONLY_CANCEL_COOLDOWN_MS - timeSinceLastCancel,
-          });
-        } else {
-          await this.placeBuyOrder(bid1, config);
-        }
+      // 对每个方向执行入场逻辑
+      for (const dir of directions) {
+        await this.runLoopAForDirection(dir, config);
       }
 
       this.consecutiveErrors = 0;
@@ -556,11 +522,104 @@ export class ScalpingStrategyEngine implements IStrategy {
     this.scheduleLoopA();
   }
 
-  private async placeBuyOrder(bidPrice: string, config: ScalpingStrategyConfig): Promise<void> {
-    const tickSize = Math.pow(10, -config.pricePrecision);
+  private async runLoopAForDirection(dir: EntryDirection, config: ScalpingStrategyConfig): Promise<void> {
+    // 获取参考价格：long→bid1, short→ask1
+    const refPrice = dir === 'long'
+      ? await this.marketDataService.getBestBid(config.symbol)
+      : await this.marketDataService.getBestAsk(config.symbol);
+    const refPriceNum = parseFloat(refPrice);
+    const spread = parseFloat(config.priceSpread);
+    this.lastTrackingPrice.set(dir, refPrice);
 
-    // 现货模式：直接使用 GTC（模拟盘 post_only 不稳定），偏移 1 tick
-    // 合约模式：自适应 post_only，连续被撤越多偏移越大，5 次后降级 GTC
+    const activeEntry = this.tracker.getActiveEntryOrder(dir);
+    const dirCancels = this.consecutivePostOnlyCancels.get(dir) || 0;
+
+    if (activeEntry && activeEntry.status === 'pending') {
+      const orderPrice = parseFloat(activeEntry.price);
+      const orderAge = Date.now() - activeEntry.createdAt;
+
+      const MIN_ORDER_LIFETIME_MS = 5000;
+      const tickSize = Math.pow(10, -config.pricePrecision);
+      const adaptiveOffset = Math.min(2 + dirCancels, 10);
+      const refreshThreshold = Math.max(tickSize * adaptiveOffset * 3, spread * 0.1);
+
+      // 价格偏离检测（方向感知）
+      let overpaying: boolean;
+      let tooFar: boolean;
+      if (dir === 'long') {
+        overpaying = orderPrice > refPriceNum + refreshThreshold;
+        tooFar = refPriceNum - orderPrice > refreshThreshold;
+      } else {
+        // Short: 入场卖单应在 ask1 附近，price < ask1 - threshold 表示太低（overpaying/过度让利），price > ask1 + threshold 表示太远
+        overpaying = orderPrice < refPriceNum - refreshThreshold;
+        tooFar = orderPrice - refPriceNum > refreshThreshold;
+      }
+
+      if (orderAge >= MIN_ORDER_LIFETIME_MS && (overpaying || tooFar)) {
+        logger.info(`刷新 ${dir} 入场单（价格偏离）`, {
+          orderId: activeEntry.orderId,
+          orderPrice: activeEntry.price,
+          refPrice,
+          direction: dir,
+          reason: overpaying ? 'overpaying' : 'too_far',
+        });
+        try {
+          await this.orderService.cancelOrder({
+            symbol: config.symbol,
+            orderId: activeEntry.orderId,
+          });
+          this.tracker.markCancelled(activeEntry.orderId);
+          this.emitEvent('BUY_ORDER_CANCELLED', {
+            orderId: activeEntry.orderId,
+            oldPrice: activeEntry.price,
+            direction: dir,
+            reason: overpaying ? 'overpaying' : 'too_far',
+          });
+        } catch {
+          this.tracker.clearActiveEntry(dir);
+          logger.debug(`撤旧 ${dir} 入场单失败（可能已成交或已撤销）`, { orderId: activeEntry.orderId });
+        }
+        await this.placeEntryOrder(dir, refPrice, config);
+      } else {
+        this.loopCounter++;
+        if (this.loopCounter % 30 === 0) {
+          logger.info(`心跳：等待 ${dir} 入场单成交`, {
+            orderId: activeEntry.orderId,
+            orderPrice: activeEntry.price,
+            refPrice,
+            direction: dir,
+            pendingExits: this.tracker.getPendingExitOrders(dir).length,
+            totalPositionUsdt: this.tracker.getTotalPositionUsdt(),
+            realizedPnl: this.realizedPnl.toFixed(4),
+            tradeCount: this.tradeCount,
+            dynamicSpread: this.lastDynamicSpread,
+          });
+        }
+      }
+    } else {
+      // 防止 post_only 被交易所撤销后立即重新下单
+      const lastCancelledAt = this.lastEntryCancelledAt.get(dir) || 0;
+      const timeSinceLastCancel = Date.now() - lastCancelledAt;
+      if (lastCancelledAt > 0 && timeSinceLastCancel < POST_ONLY_CANCEL_COOLDOWN_MS) {
+        logger.debug(`${dir} post_only 冷却中`, {
+          cooldownRemaining: POST_ONLY_CANCEL_COOLDOWN_MS - timeSinceLastCancel,
+        });
+      } else {
+        await this.placeEntryOrder(dir, refPrice, config);
+      }
+    }
+  }
+
+  /**
+   * 下入场单（方向感知）
+   * long: buy at bid1 - offset
+   * short: sell at ask1 + offset
+   */
+  private async placeEntryOrder(dir: EntryDirection, refPrice: string, config: ScalpingStrategyConfig): Promise<void> {
+    const tickSize = Math.pow(10, -config.pricePrecision);
+    const dirCancels = this.consecutivePostOnlyCancels.get(dir) || 0;
+
+    // 自适应 force + tick offset
     let force: string;
     let adaptiveTickOffset: number;
     if (config.tradingType === 'spot') {
@@ -568,33 +627,35 @@ export class ScalpingStrategyEngine implements IStrategy {
       adaptiveTickOffset = 1;
     } else {
       const baseTickOffset = 2;
-      adaptiveTickOffset = Math.min(baseTickOffset + this.consecutivePostOnlyCancels, 10);
-      const useGtc = this.consecutivePostOnlyCancels >= 5;
+      adaptiveTickOffset = Math.min(baseTickOffset + dirCancels, 10);
+      const useGtc = dirCancels >= 5;
       force = useGtc ? 'gtc' : 'post_only';
     }
 
-    // 宏观信号调整：bearish + 高风险 → 增加 tick offset（更保守入场）
+    // 宏观信号调整
     const macroSpread = this.getMacroSpreadAdjustment();
-    if (macroSpread.direction === 'bearish' && macroSpread.riskScore > 70) {
+    if (dir === 'long' && macroSpread.direction === 'bearish' && macroSpread.riskScore > 70) {
+      const extraTicks = Math.ceil((macroSpread.riskScore - 70) / 15);
+      adaptiveTickOffset += extraTicks;
+    }
+    if (dir === 'short' && macroSpread.direction === 'bullish' && macroSpread.riskScore > 70) {
       const extraTicks = Math.ceil((macroSpread.riskScore - 70) / 15);
       adaptiveTickOffset += extraTicks;
     }
 
-    const adjustedPrice = parseFloat(bidPrice) - tickSize * adaptiveTickOffset;
+    // 计算入场价格
+    const refPriceNum = parseFloat(refPrice);
+    let adjustedPrice: number;
+    if (dir === 'long') {
+      adjustedPrice = refPriceNum - tickSize * adaptiveTickOffset;
+    } else {
+      adjustedPrice = refPriceNum + tickSize * adaptiveTickOffset;
+    }
     const price = adjustedPrice.toFixed(config.pricePrecision);
 
-    // 获取 ask1 用于诊断日志
-    let ask1: string | null = null;
-    try {
-      ask1 = await this.marketDataService.getBestAsk(config.symbol);
-    } catch {
-      // 非关键信息，忽略错误
-    }
-
     const size = this.calculateSize(config.orderAmountUsdt, price, config.sizePrecision);
-
     if (!size) {
-      logger.warn('下单数量为零，跳过挂单', {
+      logger.warn(`${dir} 下单数量为零，跳过`, {
         orderAmountUsdt: config.orderAmountUsdt,
         price,
         sizePrecision: config.sizePrecision,
@@ -602,35 +663,36 @@ export class ScalpingStrategyEngine implements IStrategy {
       return;
     }
 
-    const clientOid = `scalp_${config.symbol}_${config.direction}_buy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const entrySide = dir === 'long' ? 'buy' : 'sell';
+    const clientOid = `scalp_${config.symbol}_${dir}_entry_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     try {
-      // 合约模式下始终发送 tradeSide
-      // 双向持仓 → 'open'; 单向持仓 → 不发（但默认 double_hold 以确保安全）
-      const buyTradeSide = config.tradingType === 'futures'
+      // tradeSide: 双向持仓 → 'open'; 单向持仓 → undefined
+      const entryTradeSide = config.tradingType === 'futures'
         ? (this.holdMode === 'single_hold' ? undefined : 'open')
         : undefined;
 
       const result = await this.orderService.placeOrder({
         symbol: config.symbol,
         size,
-        side: 'buy',
+        side: entrySide,
         orderType: 'limit',
         price,
         force,
-        tradeSide: buyTradeSide,
+        tradeSide: entryTradeSide,
         clientOid,
       });
 
       const trackedOrder: TrackedOrder = {
         orderId: result.orderId,
         clientOid,
-        side: 'buy',
+        side: entrySide,
         price,
         size,
         status: 'pending',
         linkedOrderId: null,
-        direction: config.direction || 'long',
+        direction: dir,
+        orderRole: 'entry',
         createdAt: Date.now(),
         filledAt: null,
       };
@@ -641,14 +703,15 @@ export class ScalpingStrategyEngine implements IStrategy {
         orderId: result.orderId,
         price,
         size,
-        bid1: bidPrice,
-        ask1,
+        refPrice,
+        direction: dir,
+        side: entrySide,
         tickOffset: adaptiveTickOffset,
         force,
-        consecutivePostOnlyCancels: this.consecutivePostOnlyCancels,
+        consecutivePostOnlyCancels: dirCancels,
       });
     } catch (error) {
-      logger.warn('挂买单失败', { error: String(error), price, size, bid1: bidPrice, ask1, force });
+      logger.warn(`${dir} 挂入场单失败`, { error: String(error), price, size, refPrice, direction: dir, force });
     }
   }
 
@@ -672,12 +735,11 @@ export class ScalpingStrategyEngine implements IStrategy {
       const exchangePending = await this.orderService.getPendingOrders(config.symbol);
       const exchangePendingIds = new Set(exchangePending.map(o => o.orderId));
 
-      // 对账第一步：找出消失的订单
+      // 对账：找出消失的订单
       const disappeared = this.tracker.findDisappearedOrders(exchangePendingIds);
 
-      // 对账第二步：通过订单详情 API 确认真实状态
-      const filledBuyOrders: TrackedOrder[] = [];
-      const filledSellOrders: TrackedOrder[] = [];
+      const filledEntryOrders: TrackedOrder[] = [];
+      const filledExitOrders: TrackedOrder[] = [];
 
       for (const { order } of disappeared) {
         try {
@@ -689,12 +751,15 @@ export class ScalpingStrategyEngine implements IStrategy {
               this.persistenceService.persistOrderStatusChange(
                 order.orderId, 'filled', confirmed.filledAt || Date.now(), confirmed.linkedOrderId
               );
-              if (confirmed.side === 'buy') {
-                filledBuyOrders.push(confirmed);
-                // 买单成交，重置 post_only 连续被撤计数
-                this.consecutivePostOnlyCancels = 0;
+
+              const isEntry = this.isEntryOrder(confirmed);
+              if (isEntry) {
+                filledEntryOrders.push(confirmed);
+                // 入场成交，重置该方向的 post_only 被撤计数
+                const dir = this.getOrderDirection(confirmed);
+                if (dir) this.consecutivePostOnlyCancels.set(dir, 0);
               } else {
-                filledSellOrders.push(confirmed);
+                filledExitOrders.push(confirmed);
               }
             }
           } else if (detail.state === 'live' || detail.state === 'partially_filled') {
@@ -706,15 +771,19 @@ export class ScalpingStrategyEngine implements IStrategy {
           } else {
             this.tracker.markExchangeCancelled(order.orderId);
             this.persistenceService.persistOrderStatusChange(order.orderId, 'cancelled', null, null);
-            // 记录买单被交易所撤销的时间和连续被撤次数
-            if (order.side === 'buy') {
-              this.lastBuyCancelledAt = Date.now();
-              this.consecutivePostOnlyCancels++;
-              logger.info('买单被交易所撤销（post_only）', {
-                consecutivePostOnlyCancels: this.consecutivePostOnlyCancels,
-                orderId: order.orderId,
-                price: order.price,
-              });
+            // 记录入场单被交易所撤销
+            if (this.isEntryOrder(order)) {
+              const dir = this.getOrderDirection(order);
+              if (dir) {
+                this.lastEntryCancelledAt.set(dir, Date.now());
+                const prevCancels = this.consecutivePostOnlyCancels.get(dir) || 0;
+                this.consecutivePostOnlyCancels.set(dir, prevCancels + 1);
+                logger.info(`${dir} 入场单被交易所撤销（post_only）`, {
+                  consecutivePostOnlyCancels: prevCancels + 1,
+                  orderId: order.orderId,
+                  price: order.price,
+                });
+              }
             }
             logger.info('订单被交易所撤销', {
               orderId: order.orderId,
@@ -731,26 +800,28 @@ export class ScalpingStrategyEngine implements IStrategy {
         }
       }
 
-      // 处理买单成交 → 挂卖单
-      for (const buyOrder of filledBuyOrders) {
-        await this.handleBuyFilled(buyOrder, config);
+      // 处理入场成交 → 挂出场单
+      for (const entryOrder of filledEntryOrders) {
+        await this.handleEntryFilled(entryOrder, config);
       }
 
-      // 处理卖单成交 → 计算 PnL
-      for (const sellOrder of filledSellOrders) {
-        this.handleSellFilled(sellOrder);
+      // 处理出场成交 → 计算 PnL
+      for (const exitOrder of filledExitOrders) {
+        this.handleExitFilled(exitOrder);
       }
 
-      // 检查是否需要合并
-      if (this.mergeEngine!.needsMerge()) {
-        logger.info('挂单数达到上限，触发合并');
-        const mergeResult = await this.mergeEngine!.mergeSellOrders();
-        if (mergeResult) {
-          this.emitEvent('ORDERS_MERGED', mergeResult as unknown as Record<string, unknown>);
+      // 检查合并（per-direction）
+      const directions = this.getActiveDirections(config);
+      for (const dir of directions) {
+        if (this.mergeEngine!.needsMerge(dir)) {
+          logger.info(`${dir} 挂单数达到上限，触发合并`);
+          const mergeResult = await this.mergeEngine!.mergeExitOrders(dir);
+          if (mergeResult) {
+            this.emitEvent('ORDERS_MERGED', { ...mergeResult as unknown as Record<string, unknown>, direction: dir });
+          }
         }
       }
 
-      // 定期清理历史订单
       this.tracker.cleanup();
 
       // 同步未实现盈亏和权益
@@ -772,25 +843,40 @@ export class ScalpingStrategyEngine implements IStrategy {
     this.scheduleLoopB();
   }
 
-  private async handleBuyFilled(buyOrder: TrackedOrder, config: ScalpingStrategyConfig): Promise<void> {
-    const buyPrice = parseFloat(buyOrder.price);
+  /**
+   * 入场成交处理（方向感知）
+   */
+  private async handleEntryFilled(entryOrder: TrackedOrder, config: ScalpingStrategyConfig): Promise<void> {
+    const entryPrice = parseFloat(entryOrder.price);
+    const dir = this.getOrderDirection(entryOrder) || 'long';
 
-    // 使用动态价差（如果启用）或静态价差
+    // 动态价差
     let effectiveSpread = config.priceSpread;
     if (config.dynamicSpreadEnabled && this.candleDataService) {
-      effectiveSpread = await this.calculateDynamicSpread(config, buyPrice);
-      logger.info('卖单使用动态价差', {
+      effectiveSpread = await this.calculateDynamicSpread(config, entryPrice);
+      logger.info('出场单使用动态价差', {
         staticSpread: config.priceSpread,
         dynamicSpread: effectiveSpread,
-        buyPrice: buyOrder.price,
+        entryPrice: entryOrder.price,
+        direction: dir,
       });
     }
-    const sellPrice = (buyPrice + parseFloat(effectiveSpread)).toFixed(config.pricePrecision);
 
-    // 等待仓位在交易所结算（Bitget 模拟盘结算较慢，需要 5-8 秒）
+    // 计算出场价格
+    let exitPrice: string;
+    if (dir === 'long') {
+      exitPrice = (entryPrice + parseFloat(effectiveSpread)).toFixed(config.pricePrecision);
+    } else {
+      exitPrice = (entryPrice - parseFloat(effectiveSpread)).toFixed(config.pricePrecision);
+    }
+
+    // 出场 side
+    const exitSide = dir === 'long' ? 'sell' : 'buy';
+
+    // 等待仓位结算
     await this.sleep(5000);
 
-    // 卖单前检查持仓是否已到位，同时从持仓 holdSide 验证/纠正 holdMode
+    // 验证持仓并纠正 holdMode
     if (config.tradingType === 'futures' && config.productType) {
       try {
         const futuresAccountSvc = new FuturesAccountService();
@@ -801,11 +887,9 @@ export class ScalpingStrategyEngine implements IStrategy {
           p => p.symbol === config.symbol && parseFloat(p.total) > 0
         );
         if (!pos) {
-          logger.warn('卖单前检查：持仓未到位，额外等待', { symbol: config.symbol });
+          logger.warn('出场单前检查：持仓未到位，额外等待', { symbol: config.symbol, direction: dir });
           await this.sleep(3000);
         } else {
-          // 从持仓 posMode/holdSide 验证/纠正 holdMode
-          // 注意：one_way_mode 下 Bitget 可能返回 holdSide='long' 而非 'net'，必须优先检查 posMode
           const inferredMode: HoldMode =
             pos.posMode === 'one_way_mode' || pos.holdSide === 'net' ? 'single_hold' : 'double_hold';
           if (inferredMode !== this.holdMode) {
@@ -819,37 +903,28 @@ export class ScalpingStrategyEngine implements IStrategy {
           }
         }
       } catch (error) {
-        logger.warn('卖单前持仓检查失败，继续使用已知 holdMode', { error: String(error) });
+        logger.warn('出场单前持仓检查失败，继续使用已知 holdMode', { error: String(error) });
       }
     }
 
-    // 重试策略：（动态切换持仓模式）
-    // Attempts 1-2: 按检测到的 holdMode 尝试
-    // Attempt 3: 如果连续 22002/40774，自动切换 holdMode 并重试
-    // Attempts 4-5: 使用切换后的 holdMode
-    // Attempt 6: 反转回原始 holdMode（最后尝试 limit）
-    // Attempt 7: market 单 + 两种 tradeSide 都试
+    // 重试策略（与原 handleBuyFilled 一致）
     const maxRetries = 7;
-    const retryDelays = [2000, 2000, 2000, 3000, 3000, 3000]; // attempt 1..6 失败后的等待时间
+    const retryDelays = [2000, 2000, 2000, 3000, 3000, 3000];
     let effectiveHoldMode = this.holdMode;
     let holdModeSwitched = false;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      const clientOid = `scalp_${config.symbol}_${config.direction}_sell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const clientOid = `scalp_${config.symbol}_${dir}_exit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-      // 确定 tradeSide
-      let sellTradeSide: 'open' | 'close' | undefined;
+      let exitTradeSide: 'open' | 'close' | undefined;
       let useForce: string = 'post_only';
       if (config.tradingType === 'futures') {
         if (attempt <= maxRetries - 2) {
-          // 前 N-2 次：按当前 effectiveHoldMode（可能已动态切换）
-          sellTradeSide = effectiveHoldMode === 'single_hold' ? undefined : 'close';
+          exitTradeSide = effectiveHoldMode === 'single_hold' ? undefined : 'close';
         } else if (attempt === maxRetries - 1) {
-          // 倒数第二次：反转策略（万一动态切换也不对）
-          sellTradeSide = effectiveHoldMode === 'single_hold' ? 'close' : undefined;
+          exitTradeSide = effectiveHoldMode === 'single_hold' ? 'close' : undefined;
         } else {
-          // 最后一次：用 market 单，无 tradeSide（one-way 兼容）
-          sellTradeSide = undefined;
+          exitTradeSide = undefined;
           useForce = 'gtc';
         }
       }
@@ -857,55 +932,58 @@ export class ScalpingStrategyEngine implements IStrategy {
       try {
         const result = await this.orderService.placeOrder({
           symbol: config.symbol,
-          size: buyOrder.size,
-          side: 'sell',
+          size: entryOrder.size,
+          side: exitSide,
           orderType: attempt === maxRetries ? 'market' : 'limit',
-          price: attempt === maxRetries ? undefined : sellPrice,
+          price: attempt === maxRetries ? undefined : exitPrice,
           force: useForce,
-          tradeSide: sellTradeSide,
+          tradeSide: exitTradeSide,
           clientOid,
         });
 
-        const sellTracked: TrackedOrder = {
+        const exitTracked: TrackedOrder = {
           orderId: result.orderId,
           clientOid,
-          side: 'sell',
-          price: sellPrice,
-          size: buyOrder.size,
+          side: exitSide,
+          price: exitPrice,
+          size: entryOrder.size,
           status: 'pending',
-          linkedOrderId: buyOrder.orderId,
-          direction: config.direction || 'long',
+          linkedOrderId: entryOrder.orderId,
+          direction: dir,
+          orderRole: 'exit',
           createdAt: Date.now(),
           filledAt: null,
         };
-        this.tracker.addOrder(sellTracked);
-        this.persistenceService.persistNewOrder(sellTracked, config.symbol, config.productType || '', config.marginCoin || 'USDT');
+        this.tracker.addOrder(exitTracked);
+        this.persistenceService.persistNewOrder(exitTracked, config.symbol, config.productType || '', config.marginCoin || 'USDT');
 
-        this.tracker.linkOrders(buyOrder.orderId, result.orderId);
+        this.tracker.linkOrders(entryOrder.orderId, result.orderId);
         this.emitEvent('SELL_ORDER_PLACED', {
           orderId: result.orderId,
-          buyOrderId: buyOrder.orderId,
-          buyPrice: buyOrder.price,
-          sellPrice,
-          size: buyOrder.size,
+          entryOrderId: entryOrder.orderId,
+          entryPrice: entryOrder.price,
+          exitPrice,
+          exitSide,
+          direction: dir,
+          size: entryOrder.size,
           attempt,
-          usedTradeSide: sellTradeSide,
+          usedTradeSide: exitTradeSide,
           orderType: attempt === maxRetries ? 'market' : 'limit',
         });
 
-        logger.info('买单成交，已挂卖单', {
-          buyOrderId: buyOrder.orderId,
-          buyPrice: buyOrder.price,
-          sellOrderId: result.orderId,
-          sellPrice,
+        logger.info(`${dir} 入场成交，已挂出场单`, {
+          entryOrderId: entryOrder.orderId,
+          entryPrice: entryOrder.price,
+          exitOrderId: result.orderId,
+          exitPrice,
+          exitSide,
           attempt,
           holdMode: this.holdMode,
-          tradeSide: sellTradeSide,
+          tradeSide: exitTradeSide,
         });
         return;
       } catch (error) {
         const errMsg = String(error);
-        // 检查 AppError.details 中的 Bitget 错误码（String(error) 不包含 details）
         const bitgetCode = this.extractBitgetCode(error);
         const isPositionError =
           errMsg.includes('22002') ||
@@ -916,49 +994,44 @@ export class ScalpingStrategyEngine implements IStrategy {
           bitgetCode === '40774';
 
         if (attempt < maxRetries) {
-          // 动态切换持仓模式：仅在 40774（持仓模式不匹配）时才切换
-          // 22002（暂无仓位可平）通常是仓位结算延迟，不应切换 holdMode
-          // 502 等网络错误也应重试
           if (!holdModeSwitched && isModeError && attempt >= 2) {
             const oldMode = effectiveHoldMode;
             effectiveHoldMode = effectiveHoldMode === 'single_hold' ? 'double_hold' : 'single_hold';
             holdModeSwitched = true;
-            this.holdMode = effectiveHoldMode; // 更新实例级别，影响后续买单
+            this.holdMode = effectiveHoldMode;
             if (this.mergeEngine) {
               this.mergeEngine.updateHoldMode(effectiveHoldMode);
             }
-            logger.info('动态切换持仓模式', { from: oldMode, to: effectiveHoldMode, attempt });
+            logger.info('动态切换持仓模式', { from: oldMode, to: effectiveHoldMode, attempt, direction: dir });
           }
           const isNetworkError = !isPositionError && !isModeError;
           const delay = isNetworkError ? 3000 : isPositionError ? 3000 : (retryDelays[attempt - 1] || 5000);
-          logger.warn('挂卖单失败，等待重试', {
-            buyOrderId: buyOrder.orderId,
+          logger.warn(`${dir} 挂出场单失败，等待重试`, {
+            entryOrderId: entryOrder.orderId,
             attempt,
             maxRetries,
             nextDelayMs: delay,
             error: errMsg,
             bitgetCode,
             effectiveHoldMode,
-            usedTradeSide: sellTradeSide,
-            isPositionError,
-            isModeError,
-            isNetworkError,
+            usedTradeSide: exitTradeSide,
           });
           await this.sleep(delay);
           continue;
         }
 
-        logger.error('挂卖单最终失败', {
+        logger.error(`${dir} 挂出场单最终失败`, {
           error: errMsg,
-          buyOrderId: buyOrder.orderId,
+          entryOrderId: entryOrder.orderId,
           attempt,
           bitgetCode,
           holdMode: this.holdMode,
         });
         this.emitEvent('SELL_ORDER_FAILED', {
-          buyOrderId: buyOrder.orderId,
-          buyPrice: buyOrder.price,
-          sellPrice,
+          entryOrderId: entryOrder.orderId,
+          entryPrice: entryOrder.price,
+          exitPrice,
+          direction: dir,
           error: errMsg,
           attempts: attempt,
         });
@@ -968,36 +1041,31 @@ export class ScalpingStrategyEngine implements IStrategy {
   }
 
   /**
-   * 从 AppError 中提取 Bitget 错误码
+   * 出场成交处理（方向感知 PnL）
    */
-  private extractBitgetCode(error: unknown): string {
-    if (error instanceof AppError && error.details) {
-      const details = error.details as Record<string, unknown>;
-      const data = details.data as Record<string, unknown> | undefined;
-      return data?.code ? String(data.code) : '';
-    }
-    return '';
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private handleSellFilled(sellOrder: TrackedOrder): void {
+  private handleExitFilled(exitOrder: TrackedOrder): void {
     this.tradeCount++;
+    const dir = this.getOrderDirection(exitOrder) || 'long';
 
-    const buyOrder = sellOrder.linkedOrderId
-      ? this.tracker.getOrder(sellOrder.linkedOrderId)
+    const entryOrder = exitOrder.linkedOrderId
+      ? this.tracker.getOrder(exitOrder.linkedOrderId)
       : null;
 
-    if (buyOrder) {
-      const buyPrice = parseFloat(buyOrder.price);
-      const sellPrice = parseFloat(sellOrder.price);
-      const size = parseFloat(sellOrder.size);
-      const pnl = (sellPrice - buyPrice) * size;
+    if (entryOrder) {
+      const entryPrice = parseFloat(entryOrder.price);
+      const exitPrice = parseFloat(exitOrder.price);
+      const size = parseFloat(exitOrder.size);
+
+      // PnL: long = (exit-entry)*size, short = (entry-exit)*size
+      let pnl: number;
+      if (dir === 'long') {
+        pnl = (exitPrice - entryPrice) * size;
+      } else {
+        pnl = (entryPrice - exitPrice) * size;
+      }
 
       const fee = StrategyConfigManager.estimateFeeUsdt(
-        (sellPrice * size).toFixed(2)
+        (exitPrice * size).toFixed(2)
       ) * 2;
       const netPnl = pnl - fee;
 
@@ -1006,41 +1074,61 @@ export class ScalpingStrategyEngine implements IStrategy {
       this.persistenceService.persistRealizedPnl(netPnl, fee, netPnl > 0);
 
       this.emitEvent('SELL_ORDER_FILLED', {
-        sellOrderId: sellOrder.orderId,
-        buyOrderId: buyOrder.orderId,
-        buyPrice: buyOrder.price,
-        sellPrice: sellOrder.price,
-        size: sellOrder.size,
+        exitOrderId: exitOrder.orderId,
+        entryOrderId: entryOrder.orderId,
+        entryPrice: entryOrder.price,
+        exitPrice: exitOrder.price,
+        size: exitOrder.size,
+        direction: dir,
         grossPnl: pnl.toFixed(4),
         fee: fee.toFixed(4),
         netPnl: netPnl.toFixed(4),
       });
 
-      logger.info('卖单成交', {
-        sellOrderId: sellOrder.orderId,
+      logger.info(`${dir} 出场成交`, {
+        exitOrderId: exitOrder.orderId,
+        direction: dir,
         netPnl: netPnl.toFixed(4),
         totalPnl: this.realizedPnl.toFixed(4),
       });
     } else {
       this.emitEvent('SELL_ORDER_FILLED', {
-        sellOrderId: sellOrder.orderId,
-        sellPrice: sellOrder.price,
-        size: sellOrder.size,
-        note: '无法找到对应买单',
+        exitOrderId: exitOrder.orderId,
+        exitPrice: exitOrder.price,
+        size: exitOrder.size,
+        direction: dir,
+        note: '无法找到对应入场单',
       });
     }
+  }
+
+  // ============================================================
+  // 辅助方法：判断入场/出场 + 推断方向
+  // ============================================================
+
+  /**
+   * 判断订单是否为入场单
+   */
+  private isEntryOrder(order: TrackedOrder): boolean {
+    if (order.orderRole) return order.orderRole === 'entry';
+    // Legacy: long 方向 buy 是入场, short 方向 sell 是入场
+    if (order.direction === 'short') return order.side === 'sell';
+    return order.side === 'buy';
+  }
+
+  /**
+   * 获取订单方向
+   */
+  private getOrderDirection(order: TrackedOrder): EntryDirection | null {
+    if (order.direction === 'long' || order.direction === 'short') return order.direction;
+    // Legacy: buy=long, sell exit=long
+    return 'long';
   }
 
   // ============================================================
   // 动态价差计算
   // ============================================================
 
-  /**
-   * 根据技术指标动态计算价差
-   * - ATR: 基础波动率参考，ATR × volatilityMultiplier
-   * - RSI: 超买(>70)/超卖(<30) 时扩大价差（减少风险暴露）
-   * - Bollinger Band Width: 收窄时缩小价差（低波动抓小利润），放大时扩大价差
-   */
   private async calculateDynamicSpread(
     config: ScalpingStrategyConfig,
     currentPrice: number
@@ -1059,12 +1147,10 @@ export class ScalpingStrategyEngine implements IStrategy {
       const multiplier = config.volatilityMultiplier ?? 1.2;
       const maxDynamic = config.maxDynamicSpread
         ? parseFloat(config.maxDynamicSpread)
-        : currentPrice * 0.01; // 默认最大为价格的 1%
+        : currentPrice * 0.01;
 
-      // ATR 基础价差：ATR × multiplier
       let dynamicSpread = indicators.atr * multiplier;
 
-      // RSI 调整：极端值时扩大价差
       if (indicators.rsi > 70 || indicators.rsi < 30) {
         const rsiExtremeFactor = 1 + Math.abs(indicators.rsi - 50) / 100;
         dynamicSpread *= rsiExtremeFactor;
@@ -1074,22 +1160,16 @@ export class ScalpingStrategyEngine implements IStrategy {
         });
       }
 
-      // Bollinger Band Width 调整：宽度比例影响价差
-      // bbWidth < 2% = 低波动（收紧），bbWidth > 4% = 高波动（放大）
       const bbWidthPercent = indicators.bollingerWidth * 100;
       if (bbWidthPercent < 2) {
-        // 低波动：价差缩小到 80%
         dynamicSpread *= 0.8;
       } else if (bbWidthPercent > 4) {
-        // 高波动：价差放大 20%
         dynamicSpread *= 1.2;
       }
 
-      // 宏观信号调整价差
       const macroAdj = this.getMacroSpreadAdjustment();
       dynamicSpread *= macroAdj.multiplier;
 
-      // 价差不低于静态配置值，不超过最大动态价差
       dynamicSpread = Math.max(dynamicSpread, staticSpread);
       dynamicSpread = Math.min(dynamicSpread, maxDynamic);
 
@@ -1116,10 +1196,6 @@ export class ScalpingStrategyEngine implements IStrategy {
   // 辅助方法
   // ============================================================
 
-  /**
-   * 获取宏观信号价差调整
-   * 服务未初始化时安全降级返回中性值
-   */
   private getMacroSpreadAdjustment(): { multiplier: number; direction: string; riskScore: number } {
     try {
       return PolymarketSignalService.getInstance().getSpreadAdjustment();
@@ -1128,9 +1204,21 @@ export class ScalpingStrategyEngine implements IStrategy {
     }
   }
 
+  private extractBitgetCode(error: unknown): string {
+    if (error instanceof AppError && error.details) {
+      const details = error.details as Record<string, unknown>;
+      const data = details.data as Record<string, unknown> | undefined;
+      return data?.code ? String(data.code) : '';
+    }
+    return '';
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   private checkFeeCoverage(config: ScalpingStrategyConfig, spec: ContractSpecInfo): void {
     const spread = parseFloat(config.priceSpread);
-    // 买单 post_only = maker fee, 卖单可能成交为 taker
     const totalFeeRate = spec.makerFeeRate + spec.takerFeeRate;
 
     const breakevenPrice = spread / totalFeeRate;

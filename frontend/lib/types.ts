@@ -70,6 +70,9 @@ export interface GridStrategyConfig extends BaseStrategyConfig {
 /** 任意策略配置 */
 export type AnyStrategyConfig = ScalpingStrategyConfig | GridStrategyConfig;
 
+/** 订单角色 */
+export type OrderRole = 'entry' | 'exit';
+
 /** 内存追踪订单 */
 export interface TrackedOrder {
   orderId: string;
@@ -80,6 +83,7 @@ export interface TrackedOrder {
   status: TrackedOrderStatus;
   linkedOrderId: string | null;
   direction: StrategyDirection;
+  orderRole?: OrderRole;
   createdAt: number;
   filledAt: number | null;
 }
@@ -105,6 +109,12 @@ export interface StrategyState {
   lastError: string | null;
   startedAt: number | null;
   uptimeMs: number;
+
+  // Per-direction state (bidirectional scalping)
+  activeEntryOrders?: Record<string, string | null>;
+  lastTrackingPrices?: Record<string, string | null>;
+  pendingExitCounts?: Record<string, number>;
+  positionUsdtByDirection?: Record<string, string>;
 }
 
 /** 策略事件类型 */

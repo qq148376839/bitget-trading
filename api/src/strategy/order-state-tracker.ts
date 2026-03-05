@@ -1,12 +1,15 @@
 /**
  * 订单状态追踪器
  * 内存管理所有策略挂单，通过对账发现成交
+ * 支持方向感知的入场/出场追踪（bidirectional scalping）
  */
 
-import { TrackedOrder, TrackedOrderSide, TrackedOrderStatus } from '../types/strategy.types';
+import { TrackedOrder } from '../types/strategy.types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('order-tracker');
+
+export type EntryDirection = 'long' | 'short';
 
 export interface ReconcileResult {
   filledBuyOrders: TrackedOrder[];
@@ -21,17 +24,29 @@ export interface DisappearedOrder {
 
 export class OrderStateTracker {
   private orders: Map<string, TrackedOrder> = new Map();
-  private activeBuyOrderId: string | null = null;
+  private activeEntryOrderIds: Map<EntryDirection, string | null> = new Map([
+    ['long', null],
+    ['short', null],
+  ]);
 
   /**
    * 添加追踪订单
    */
   addOrder(order: TrackedOrder): void {
     this.orders.set(order.orderId, order);
-    if (order.side === 'buy' && order.status === 'pending') {
-      this.activeBuyOrderId = order.orderId;
+    // 如果是入场单，自动设置 activeEntry
+    if (order.orderRole === 'entry' && order.status === 'pending') {
+      const dir = this.inferEntryDirection(order);
+      if (dir) {
+        this.activeEntryOrderIds.set(dir, order.orderId);
+      }
     }
-    logger.debug('追踪新订单', { orderId: order.orderId, side: order.side, price: order.price });
+    // Legacy: 向后兼容无 orderRole 的买单（网格引擎等）
+    if (!order.orderRole && order.side === 'buy' && order.status === 'pending') {
+      const dir = (order.direction === 'short') ? 'short' : 'long';
+      this.activeEntryOrderIds.set(dir, order.orderId);
+    }
+    logger.debug('追踪新订单', { orderId: order.orderId, side: order.side, price: order.price, role: order.orderRole, direction: order.direction });
   }
 
   /**
@@ -41,37 +56,109 @@ export class OrderStateTracker {
     return this.orders.get(orderId);
   }
 
+  // ============================================================
+  // 方向感知的入场追踪 (bidirectional)
+  // ============================================================
+
   /**
-   * 获取当前活跃买单 ID
+   * 获取指定方向的活跃入场单 ID
+   */
+  getActiveEntryOrderId(direction: EntryDirection): string | null {
+    return this.activeEntryOrderIds.get(direction) || null;
+  }
+
+  /**
+   * 获取指定方向的活跃入场单
+   */
+  getActiveEntryOrder(direction: EntryDirection): TrackedOrder | null {
+    const id = this.activeEntryOrderIds.get(direction);
+    if (!id) return null;
+    return this.orders.get(id) || null;
+  }
+
+  /**
+   * 设置指定方向的活跃入场单
+   */
+  setActiveEntry(direction: EntryDirection, orderId: string): void {
+    this.activeEntryOrderIds.set(direction, orderId);
+  }
+
+  /**
+   * 清除指定方向的活跃入场单
+   */
+  clearActiveEntry(direction: EntryDirection): void {
+    this.activeEntryOrderIds.set(direction, null);
+  }
+
+  /**
+   * 获取挂起的出场单（按方向过滤）
+   */
+  getPendingExitOrders(direction?: EntryDirection): TrackedOrder[] {
+    const exits: TrackedOrder[] = [];
+    for (const order of this.orders.values()) {
+      if (order.status !== 'pending') continue;
+      if (order.orderRole === 'exit') {
+        if (!direction || this.inferExitDirection(order) === direction) {
+          exits.push(order);
+        }
+      } else if (!order.orderRole && order.side === 'sell') {
+        // Legacy: 无 orderRole 的卖单视为出场单
+        if (!direction || order.direction === direction || order.direction === 'both') {
+          exits.push(order);
+        }
+      }
+    }
+    return exits.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /**
+   * 按方向计算持仓 USDT
+   */
+  getTotalPositionUsdtByDirection(direction: EntryDirection): string {
+    let total = 0;
+    const exits = this.getPendingExitOrders(direction);
+    for (const order of exits) {
+      total += parseFloat(order.price) * parseFloat(order.size);
+    }
+    return total.toFixed(2);
+  }
+
+  // ============================================================
+  // 向后兼容包装器（网格引擎 + 旧代码）
+  // ============================================================
+
+  /**
+   * 获取当前活跃买单 ID（向后兼容 — 返回 long 方向的入场单）
    */
   getActiveBuyOrderId(): string | null {
-    return this.activeBuyOrderId;
+    return this.activeEntryOrderIds.get('long') || null;
   }
 
   /**
-   * 获取活跃买单
+   * 获取活跃买单（向后兼容）
    */
   getActiveBuyOrder(): TrackedOrder | null {
-    if (!this.activeBuyOrderId) return null;
-    return this.orders.get(this.activeBuyOrderId) || null;
+    const id = this.getActiveBuyOrderId();
+    if (!id) return null;
+    return this.orders.get(id) || null;
   }
 
   /**
-   * 清除活跃买单
+   * 清除活跃买单（向后兼容）
    */
   clearActiveBuy(): void {
-    this.activeBuyOrderId = null;
+    this.activeEntryOrderIds.set('long', null);
   }
 
   /**
-   * 设置活跃买单
+   * 设置活跃买单（向后兼容）
    */
   setActiveBuy(orderId: string): void {
-    this.activeBuyOrderId = orderId;
+    this.activeEntryOrderIds.set('long', orderId);
   }
 
   /**
-   * 获取所有挂起的卖单（按创建时间排序）
+   * 获取所有挂起的卖单（向后兼容 — 返回所有出场挂单）
    */
   getPendingSellOrders(): TrackedOrder[] {
     const sells: TrackedOrder[] = [];
@@ -97,12 +184,14 @@ export class OrderStateTracker {
   }
 
   /**
-   * 计算当前持仓总 USDT 值（所有挂起卖单的 size × price）
+   * 计算当前持仓总 USDT 值（所有挂起出场单的 size x price）
    */
   getTotalPositionUsdt(): string {
     let total = 0;
     for (const order of this.orders.values()) {
-      if (order.side === 'sell' && order.status === 'pending') {
+      if (order.status !== 'pending') continue;
+      // 出场单代表持仓
+      if (order.orderRole === 'exit' || (!order.orderRole && order.side === 'sell')) {
         total += parseFloat(order.price) * parseFloat(order.size);
       }
     }
@@ -136,8 +225,11 @@ export class OrderStateTracker {
     order.status = 'filled';
     order.filledAt = Date.now();
 
-    if (order.side === 'buy' && this.activeBuyOrderId === orderId) {
-      this.activeBuyOrderId = null;
+    // 清除该订单在 activeEntryOrderIds 中的引用
+    for (const [dir, id] of this.activeEntryOrderIds.entries()) {
+      if (id === orderId) {
+        this.activeEntryOrderIds.set(dir, null);
+      }
     }
 
     logger.info('确认成交订单', {
@@ -145,6 +237,7 @@ export class OrderStateTracker {
       side: order.side,
       price: order.price,
       size: order.size,
+      role: order.orderRole,
     });
 
     return order;
@@ -157,8 +250,10 @@ export class OrderStateTracker {
     const order = this.orders.get(orderId);
     if (order && order.status === 'pending') {
       order.status = 'cancelled';
-      if (this.activeBuyOrderId === orderId) {
-        this.activeBuyOrderId = null;
+      for (const [dir, id] of this.activeEntryOrderIds.entries()) {
+        if (id === orderId) {
+          this.activeEntryOrderIds.set(dir, null);
+        }
       }
       logger.info('订单被交易所撤销', {
         orderId: order.orderId,
@@ -175,8 +270,10 @@ export class OrderStateTracker {
     const order = this.orders.get(orderId);
     if (order) {
       order.status = 'cancelled';
-      if (this.activeBuyOrderId === orderId) {
-        this.activeBuyOrderId = null;
+      for (const [dir, id] of this.activeEntryOrderIds.entries()) {
+        if (id === orderId) {
+          this.activeEntryOrderIds.set(dir, null);
+        }
       }
     }
   }
@@ -191,12 +288,12 @@ export class OrderStateTracker {
   }
 
   /**
-   * 关联买单和卖单
+   * 关联入场单和出场单
    */
-  linkOrders(buyOrderId: string, sellOrderId: string): void {
-    const buyOrder = this.orders.get(buyOrderId);
-    if (buyOrder) {
-      buyOrder.linkedOrderId = sellOrderId;
+  linkOrders(entryOrderId: string, exitOrderId: string): void {
+    const entryOrder = this.orders.get(entryOrderId);
+    if (entryOrder) {
+      entryOrder.linkedOrderId = exitOrderId;
     }
   }
 
@@ -212,7 +309,8 @@ export class OrderStateTracker {
    */
   clear(): void {
     this.orders.clear();
-    this.activeBuyOrderId = null;
+    this.activeEntryOrderIds.set('long', null);
+    this.activeEntryOrderIds.set('short', null);
   }
 
   /**
@@ -228,5 +326,34 @@ export class OrderStateTracker {
         this.orders.delete(completed[i][0]);
       }
     }
+  }
+
+  // ============================================================
+  // 内部辅助
+  // ============================================================
+
+  /**
+   * 从订单推断入场方向：buy+long/both=long, sell+short=short
+   */
+  private inferEntryDirection(order: TrackedOrder): EntryDirection | null {
+    if (order.side === 'buy' && (order.direction === 'long' || order.direction === 'both')) return 'long';
+    if (order.side === 'sell' && order.direction === 'short') return 'short';
+    // Legacy fallback
+    if (order.side === 'buy') return 'long';
+    return null;
+  }
+
+  /**
+   * 从出场单推断其方向
+   */
+  private inferExitDirection(order: TrackedOrder): EntryDirection | null {
+    // 出场单的 direction 字段直接标记了方向
+    if (order.direction === 'long' || order.direction === 'short') {
+      return order.direction;
+    }
+    // Legacy: sell=long exit, buy=short exit
+    if (order.side === 'sell') return 'long';
+    if (order.side === 'buy') return 'short';
+    return null;
   }
 }

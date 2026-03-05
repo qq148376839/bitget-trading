@@ -129,17 +129,20 @@ export default function SimpleConfigForm({
     }
   }, [initialConfig]);
 
+  // When auto preset is selected and amount is empty, use placeholder to bootstrap balance fetch
+  const effectiveAmount = orderAmountUsdt || (selectedPreset === 'auto' && symbol ? '10' : '');
+
   const autoCalcInput = useMemo<SimpleConfigInput | null>(() => {
-    if (!symbol || !orderAmountUsdt) return null;
+    if (!symbol || !effectiveAmount) return null;
     return {
       strategyType,
       tradingType,
       symbol,
-      orderAmountUsdt,
+      orderAmountUsdt: effectiveAmount,
       direction: tradingType === 'futures' ? direction : undefined,
       riskLevel,
     };
-  }, [strategyType, tradingType, symbol, orderAmountUsdt, direction, riskLevel]);
+  }, [strategyType, tradingType, symbol, effectiveAmount, direction, riskLevel]);
 
   const { result, loading: calcLoading, error: calcError } = useAutoCalc(autoCalcInput);
 
@@ -167,15 +170,15 @@ export default function SimpleConfigForm({
     [bounds]
   );
 
-  // Auto-fill amount when balance first becomes available and 'auto' is selected
+  // Auto-fill amount when balance arrives and 'auto' is selected
   useEffect(() => {
-    if (selectedPreset === 'auto' && availableBalance && !orderAmountUsdt) {
+    if (selectedPreset === 'auto' && availableBalance && availableBalance > 0) {
       const minAmount = bounds?.orderAmountUsdt?.min ?? 5;
       const maxAmount = bounds?.orderAmountUsdt?.max ?? availableBalance * 0.5;
       const amount = calcAutoAmount(availableBalance, minAmount, maxAmount);
       setOrderAmountUsdt(String(amount));
     }
-  }, [selectedPreset, availableBalance, bounds, orderAmountUsdt]);
+  }, [selectedPreset, availableBalance, bounds]);
 
   const handlePresetClick = (preset: typeof AMOUNT_PRESETS[number]) => {
     setSelectedPreset(String(preset.value));

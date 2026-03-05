@@ -60,28 +60,24 @@ export class FuturesAccountService {
       logger.warn('position-mode API 查询失败', { error: String(error) });
     }
 
-    // 3. 模拟盘特殊处理：position-mode API 返回 404，
-    //    且模拟盘 hedge_mode 的 tradeSide:close 有已知 bug（22002），
-    //    主动设置为 one_way_mode 确保交易正常
-    const config = getBitgetConfig();
-    if (config.simulated) {
-      try {
-        return await this.ensureSimulatedOneWayMode(productType);
-      } catch (error) {
-        logger.warn('模拟盘单向持仓设置失败', { error: String(error) });
-      }
-    }
-
-    // 4. 从持仓列表推断（实盘 fallback）
+    // 3. 从持仓列表推断
     try {
       return await this.inferHoldModeFromPositions(productType);
     } catch (error) {
       logger.warn('从持仓列表推断持仓模式失败', { error: String(error) });
     }
 
-    // 5. 所有方法失败 → 默认双向持仓（更安全，确保 tradeSide 始终发送，避免 40774 错误）
-    logger.warn('所有持仓模式检测方法失败，默认双向持仓');
-    return 'double_hold';
+    // 4. position-mode API 404 且无持仓 → 尝试设置单向持仓
+    //    实盘和模拟盘均适用：避免默认双向导致 40774 错误
+    try {
+      return await this.ensureOneWayMode(productType);
+    } catch (error) {
+      logger.warn('设置单向持仓模式失败', { error: String(error) });
+    }
+
+    // 5. 所有方法失败 → 默认单向持仓（实盘大多数账户为单向，避免发送 tradeSide 导致 40774）
+    logger.warn('所有持仓模式检测方法失败，默认单向持仓');
+    return 'single_hold';
   }
 
   /**
@@ -115,23 +111,22 @@ export class FuturesAccountService {
   }
 
   /**
-   * 模拟盘专用：确保使用单向持仓模式
-   * 模拟盘的 hedge_mode 下 tradeSide:close 存在 22002 bug，
-   * 主动设置 one_way_mode 以确保买卖流程正常
+   * 确保使用单向持仓模式
+   * position-mode API 404 且无持仓数据时调用，适用于实盘和模拟盘
    */
-  private async ensureSimulatedOneWayMode(productType: ProductType): Promise<HoldMode> {
+  private async ensureOneWayMode(productType: ProductType): Promise<HoldMode> {
     try {
       await this.client.post<{ posMode: string }>(
         '/api/v2/mix/account/set-position-mode',
         { productType, posMode: 'one_way_mode' }
       );
-      logger.info('模拟盘已设置为单向持仓模式');
+      logger.info('已设置为单向持仓模式');
       return 'single_hold';
     } catch (error) {
       // 40920 = 有持仓/挂单无法切换，检查现有持仓的 posMode
       const errMsg = String(error);
       if (errMsg.includes('40920')) {
-        logger.info('模拟盘有持仓无法切换模式，从持仓推断');
+        logger.info('有持仓无法切换模式，从持仓推断');
         // 有持仓，看当前 posMode
         const response = await this.client.get<FuturesPosition[]>(
           '/api/v2/mix/position/all-position',
@@ -142,7 +137,7 @@ export class FuturesAccountService {
           return 'single_hold';
         }
         // 已在 hedge_mode 且有持仓无法切换 — 尝试用 close-positions 平仓后再切
-        logger.warn('模拟盘处于 hedge_mode 且有持仓，将尝试平仓后切换模式');
+        logger.warn('处于 hedge_mode 且有持仓，将尝试平仓后切换模式');
         for (const pos of positions) {
           if (parseFloat(pos.total) > 0) {
             try {
@@ -151,9 +146,9 @@ export class FuturesAccountService {
                 productType,
                 holdSide: pos.holdSide,
               });
-              logger.info('模拟盘平仓成功', { symbol: pos.symbol, holdSide: pos.holdSide });
+              logger.info('平仓成功', { symbol: pos.symbol, holdSide: pos.holdSide });
             } catch (closeErr) {
-              logger.warn('模拟盘平仓失败', { symbol: pos.symbol, error: String(closeErr) });
+              logger.warn('平仓失败', { symbol: pos.symbol, error: String(closeErr) });
             }
           }
         }
@@ -163,7 +158,7 @@ export class FuturesAccountService {
         await this.client.post('/api/v2/mix/account/set-position-mode', {
           productType, posMode: 'one_way_mode',
         });
-        logger.info('模拟盘平仓后成功切换为单向持仓模式');
+        logger.info('平仓后成功切换为单向持仓模式');
         return 'single_hold';
       }
       throw error;

@@ -455,46 +455,33 @@ export class PolymarketSignalService {
       this.httpClient = this.createHttpClient();
     }
 
+    // Gamma API 不支持原生全文搜索，需要拉取较大数据集后在服务端过滤
+    // 按交易量降序排列，确保热门市场优先
     const response = await this.httpClient.get('/markets', {
       params: {
-        _limit: 20,
+        _limit: 200,
         active: true,
         closed: false,
-        ...(query ? { tag_slug: query } : {}),
+        order: 'volumeNum',
+        ascending: false,
       },
       timeout: 15000,
     });
 
-    const markets: PolymarketMarketData[] = Array.isArray(response.data)
+    const allMarkets: PolymarketMarketData[] = Array.isArray(response.data)
       ? response.data
       : [];
 
-    // 如果 tag_slug 没结果，尝试用 question 搜索
-    if (markets.length === 0 && query) {
-      const fallbackResponse = await this.httpClient.get('/markets', {
-        params: {
-          _limit: 20,
-          active: true,
-          closed: false,
-        },
-        timeout: 15000,
-      });
-      const allMarkets: PolymarketMarketData[] = Array.isArray(fallbackResponse.data)
-        ? fallbackResponse.data
-        : [];
-      const queryLower = query.toLowerCase();
-      return allMarkets
-        .filter(m => m.question.toLowerCase().includes(queryLower))
-        .map(m => ({
-          conditionId: m.condition_id,
-          question: m.question,
-          volume: m.volume_num || 0,
-          active: m.active,
-          outcomePrices: this.parseOutcomePrices(m.outcome_prices),
-        }));
-    }
+    // 服务端按 question 文本过滤
+    const filtered = query
+      ? allMarkets.filter(m => {
+          const q = query.toLowerCase();
+          return m.question.toLowerCase().includes(q)
+            || (m.description && m.description.toLowerCase().includes(q));
+        })
+      : allMarkets;
 
-    return markets.map(m => ({
+    return filtered.slice(0, 30).map(m => ({
       conditionId: m.condition_id,
       question: m.question,
       volume: m.volume_num || 0,

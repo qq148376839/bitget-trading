@@ -34,6 +34,8 @@ export interface SimpleConfigInput {
   orderAmountUsdt: string;
   direction?: 'long' | 'short' | 'both';
   riskLevel: RiskLevel;
+  maxPositionPercent?: number;   // 用户覆盖仓位上限百分比（0-1）
+  maxDailyLossPercent?: number;  // 用户覆盖日亏上限百分比（0-1）
 }
 
 /** 推导说明 */
@@ -51,6 +53,8 @@ export interface ParameterBounds {
   gridCount?: { min: number; max: number };
   upperPrice?: { min: number; max: number };
   lowerPrice?: { min: number; max: number };
+  maxPositionPercent?: { min: number; recommended: number; max: number };
+  maxDailyLossPercent?: { min: number; recommended: number; max: number };
 }
 
 /** 自动计算结果 */
@@ -200,22 +204,49 @@ export class AutoCalcService {
       explanation: `价差 = max(最小盈利价差, 24h波动范围x0.001)。最小盈利价差基于当前价、maker+taker手续费、风险乘数计算`,
     });
 
-    // 最大仓位
-    const maxPositionUsdt = this.roundToUsdt(balanceNum * preset.maxPositionPercent);
+    // 方向感知的仓位百分比推荐
+    const dirMultiplier = direction === 'both' ? 1.5 : 1.0;
+    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.5);
+    const maxPositionPercent = input.maxPositionPercent ?? recommendedPositionPercent;
+    const maxPositionUsdt = this.roundToUsdt(balanceNum * maxPositionPercent);
+
+    derivations.push({
+      field: 'maxPositionPercent',
+      value: `${(maxPositionPercent * 100).toFixed(1)}%`,
+      formula: input.maxPositionPercent
+        ? `用户指定 ${(input.maxPositionPercent * 100).toFixed(1)}%`
+        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.5) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
+      explanation: input.maxPositionPercent
+        ? `用户自定义仓位上限百分比`
+        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限50%`,
+    });
     derivations.push({
       field: 'maxPositionUsdt',
       value: String(maxPositionUsdt),
-      formula: `${balanceNum.toFixed(2)} x ${preset.maxPositionPercent}`,
-      explanation: `最大仓位 = 可用余额 x ${riskLevel}风险等级仓位比例(${preset.maxPositionPercent * 100}%)`,
+      formula: `${balanceNum.toFixed(2)} x ${(maxPositionPercent * 100).toFixed(1)}%`,
+      explanation: `最大仓位 = 可用余额 x 仓位上限百分比`,
     });
 
-    // 每日最大亏损
-    const maxDailyLossUsdt = this.roundToUsdt(balanceNum * preset.dailyLossPercent);
+    // 日亏上限百分比
+    const recommendedDailyLossPercent = preset.dailyLossPercent;
+    const maxDailyLossPercent = input.maxDailyLossPercent ?? recommendedDailyLossPercent;
+    const maxDailyLossUsdt = this.roundToUsdt(balanceNum * maxDailyLossPercent);
+
+    derivations.push({
+      field: 'maxDailyLossPercent',
+      value: `${(maxDailyLossPercent * 100).toFixed(1)}%`,
+      formula: input.maxDailyLossPercent
+        ? `用户指定 ${(input.maxDailyLossPercent * 100).toFixed(1)}%`
+        : `预设 ${(recommendedDailyLossPercent * 100).toFixed(1)}%`,
+      explanation: input.maxDailyLossPercent
+        ? `用户自定义日亏上限百分比`
+        : `每日亏损限额 = ${riskLevel}风险等级预设(${(preset.dailyLossPercent * 100).toFixed(0)}%)`,
+    });
     derivations.push({
       field: 'maxDailyLossUsdt',
       value: String(maxDailyLossUsdt),
-      formula: `${balanceNum.toFixed(2)} x ${preset.dailyLossPercent}`,
-      explanation: `每日亏损限额 = 可用余额 x ${riskLevel}风险等级日亏比例(${preset.dailyLossPercent * 100}%)`,
+      formula: `${balanceNum.toFixed(2)} x ${(maxDailyLossPercent * 100).toFixed(1)}%`,
+      explanation: `每日亏损限额 = 可用余额 x 日亏上限百分比`,
     });
 
     // 精度
@@ -263,6 +294,8 @@ export class AutoCalcService {
       orderAmountUsdt,
       priceSpread: String(priceSpread),
       maxPositionUsdt: String(maxPositionUsdt),
+      maxPositionPercent,
+      maxDailyLossPercent,
       maxPendingOrders: preset.maxPendingOrders,
       mergeThreshold: preset.mergeThreshold,
       maxDrawdownPercent: preset.maxDrawdownPercent,
@@ -301,6 +334,16 @@ export class AutoCalcService {
       orderAmountUsdt: {
         min: Math.max(spec.minTradeNum * currentPrice * spec.sizeMultiplier, 5),
         max: Math.min(balanceNum * 0.5, 100000),
+      },
+      maxPositionPercent: {
+        min: 0.05,
+        recommended: recommendedPositionPercent,
+        max: 0.5,
+      },
+      maxDailyLossPercent: {
+        min: 0.01,
+        recommended: recommendedDailyLossPercent,
+        max: 0.2,
       },
     };
 
@@ -380,22 +423,49 @@ export class AutoCalcService {
       });
     }
 
-    // 最大仓位
-    const maxPositionUsdt = this.roundToUsdt(balanceNum * preset.maxPositionPercent);
+    // 方向感知的仓位百分比推荐
+    const dirMultiplier = direction === 'both' ? 1.5 : 1.0;
+    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.5);
+    const maxPositionPercent = input.maxPositionPercent ?? recommendedPositionPercent;
+    const maxPositionUsdt = this.roundToUsdt(balanceNum * maxPositionPercent);
+
+    derivations.push({
+      field: 'maxPositionPercent',
+      value: `${(maxPositionPercent * 100).toFixed(1)}%`,
+      formula: input.maxPositionPercent
+        ? `用户指定 ${(input.maxPositionPercent * 100).toFixed(1)}%`
+        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.5) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
+      explanation: input.maxPositionPercent
+        ? `用户自定义仓位上限百分比`
+        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限50%`,
+    });
     derivations.push({
       field: 'maxPositionUsdt',
       value: String(maxPositionUsdt),
-      formula: `${balanceNum.toFixed(2)} x ${preset.maxPositionPercent}`,
-      explanation: `最大仓位 = 可用余额 x ${riskLevel}风险等级仓位比例(${preset.maxPositionPercent * 100}%)`,
+      formula: `${balanceNum.toFixed(2)} x ${(maxPositionPercent * 100).toFixed(1)}%`,
+      explanation: `最大仓位 = 可用余额 x 仓位上限百分比`,
     });
 
-    // 每日最大亏损
-    const maxDailyLossUsdt = this.roundToUsdt(balanceNum * preset.dailyLossPercent);
+    // 日亏上限百分比
+    const recommendedDailyLossPercent = preset.dailyLossPercent;
+    const maxDailyLossPercent = input.maxDailyLossPercent ?? recommendedDailyLossPercent;
+    const maxDailyLossUsdt = this.roundToUsdt(balanceNum * maxDailyLossPercent);
+
+    derivations.push({
+      field: 'maxDailyLossPercent',
+      value: `${(maxDailyLossPercent * 100).toFixed(1)}%`,
+      formula: input.maxDailyLossPercent
+        ? `用户指定 ${(input.maxDailyLossPercent * 100).toFixed(1)}%`
+        : `预设 ${(recommendedDailyLossPercent * 100).toFixed(1)}%`,
+      explanation: input.maxDailyLossPercent
+        ? `用户自定义日亏上限百分比`
+        : `每日亏损限额 = ${riskLevel}风险等级预设(${(preset.dailyLossPercent * 100).toFixed(0)}%)`,
+    });
     derivations.push({
       field: 'maxDailyLossUsdt',
       value: String(maxDailyLossUsdt),
-      formula: `${balanceNum.toFixed(2)} x ${preset.dailyLossPercent}`,
-      explanation: `每日亏损限额 = 可用余额 x ${riskLevel}风险等级日亏比例(${preset.dailyLossPercent * 100}%)`,
+      formula: `${balanceNum.toFixed(2)} x ${(maxDailyLossPercent * 100).toFixed(1)}%`,
+      explanation: `每日亏损限额 = 可用余额 x 日亏上限百分比`,
     });
 
     // 精度
@@ -439,6 +509,8 @@ export class AutoCalcService {
       gridCount: preset.gridCount,
       gridType: 'arithmetic',
       maxPositionUsdt: String(maxPositionUsdt),
+      maxPositionPercent,
+      maxDailyLossPercent,
       maxDrawdownPercent: preset.maxDrawdownPercent,
       stopLossPercent: preset.stopLossPercent,
       maxDailyLossUsdt: String(maxDailyLossUsdt),
@@ -477,6 +549,16 @@ export class AutoCalcService {
       lowerPrice: {
         min: this.roundToPrice(currentPrice * 0.5, spec.pricePlace),
         max: this.roundToPrice(currentPrice * 0.999, spec.pricePlace),
+      },
+      maxPositionPercent: {
+        min: 0.05,
+        recommended: recommendedPositionPercent,
+        max: 0.5,
+      },
+      maxDailyLossPercent: {
+        min: 0.01,
+        recommended: recommendedDailyLossPercent,
+        max: 0.2,
       },
     };
 

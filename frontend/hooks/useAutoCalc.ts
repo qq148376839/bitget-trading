@@ -18,6 +18,8 @@ export interface ParameterBounds {
   gridCount?: { min: number; max: number };
   upperPrice?: { min: number; max: number };
   lowerPrice?: { min: number; max: number };
+  maxPositionPercent?: { min: number; recommended: number; max: number };
+  maxDailyLossPercent?: { min: number; recommended: number; max: number };
 }
 
 export interface AutoCalcResult {
@@ -34,6 +36,8 @@ export interface SimpleConfigInput {
   orderAmountUsdt: string;
   direction?: StrategyDirection;
   riskLevel: RiskLevel;
+  maxPositionPercent?: number;
+  maxDailyLossPercent?: number;
 }
 
 const TOKEN_KEY = 'bitget_auth_token';
@@ -84,7 +88,7 @@ export function useAutoCalc(input: SimpleConfigInput | null) {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [input?.strategyType, input?.tradingType, input?.symbol, input?.orderAmountUsdt, input?.direction, input?.riskLevel]);
+  }, [input?.strategyType, input?.tradingType, input?.symbol, input?.orderAmountUsdt, input?.direction, input?.riskLevel, input?.maxPositionPercent, input?.maxDailyLossPercent]);
 
   return { result, loading, error };
 }

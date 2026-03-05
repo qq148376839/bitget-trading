@@ -5,6 +5,7 @@ import {
   Steps,
   Form,
   Input,
+  InputNumber,
   Select,
   Radio,
   Button,
@@ -112,6 +113,12 @@ export default function SimpleConfigForm({
   const [selectedPreset, setSelectedPreset] = useState<string | null>(
     initialConfig?.orderAmountUsdt ? null : 'auto'
   );
+  const [maxPositionPercent, setMaxPositionPercent] = useState<number | undefined>(
+    initialConfig?.maxPositionPercent
+  );
+  const [maxDailyLossPercent, setMaxDailyLossPercent] = useState<number | undefined>(
+    initialConfig?.maxDailyLossPercent
+  );
 
   const isEditMode = !!initialConfig?.symbol;
 
@@ -126,8 +133,16 @@ export default function SimpleConfigForm({
         setSelectedPreset(null);
       }
       if (initialConfig.direction) setDirection(initialConfig.direction);
+      if (initialConfig.maxPositionPercent != null) setMaxPositionPercent(initialConfig.maxPositionPercent);
+      if (initialConfig.maxDailyLossPercent != null) setMaxDailyLossPercent(initialConfig.maxDailyLossPercent);
     }
   }, [initialConfig]);
+
+  // Reset percent overrides when risk level or direction changes (use preset defaults)
+  useEffect(() => {
+    setMaxPositionPercent(undefined);
+    setMaxDailyLossPercent(undefined);
+  }, [riskLevel, direction]);
 
   // When auto preset is selected and amount is empty, use placeholder to bootstrap balance fetch
   const effectiveAmount = orderAmountUsdt || (selectedPreset === 'auto' && symbol ? '10' : '');
@@ -141,8 +156,10 @@ export default function SimpleConfigForm({
       orderAmountUsdt: effectiveAmount,
       direction: tradingType === 'futures' ? direction : undefined,
       riskLevel,
+      maxPositionPercent,
+      maxDailyLossPercent,
     };
-  }, [strategyType, tradingType, symbol, effectiveAmount, direction, riskLevel]);
+  }, [strategyType, tradingType, symbol, effectiveAmount, direction, riskLevel, maxPositionPercent, maxDailyLossPercent]);
 
   const { result, loading: calcLoading, error: calcError } = useAutoCalc(autoCalcInput);
 
@@ -342,7 +359,7 @@ export default function SimpleConfigForm({
           )}
         </Row>
 
-        <Form.Item label="风险偏好" style={{ marginBottom: 0 }}>
+        <Form.Item label="风险偏好" style={{ marginBottom: 16 }}>
           <Row gutter={12}>
             {RISK_LEVEL_OPTIONS.map((option) => {
               const isSelected = riskLevel === option.value;
@@ -381,6 +398,78 @@ export default function SimpleConfigForm({
             })}
           </Row>
         </Form.Item>
+
+        {/* 风控百分比参数 */}
+        <Row gutter={16}>
+          <Col span={12}>
+            <Form.Item
+              label="仓位上限"
+              tooltip="最大仓位占可用余额的百分比。双向模式推荐更高比例（分配给多/空两方向）"
+              style={{ marginBottom: 0 }}
+            >
+              <InputNumber
+                value={maxPositionPercent != null ? Math.round(maxPositionPercent * 1000) / 10 : (result?.fullConfig.maxPositionPercent != null ? Math.round(result.fullConfig.maxPositionPercent * 1000) / 10 : undefined)}
+                onChange={(val) => {
+                  if (val == null) {
+                    setMaxPositionPercent(undefined);
+                  } else {
+                    setMaxPositionPercent(val / 100);
+                  }
+                }}
+                min={(bounds?.maxPositionPercent?.min ?? 0.05) * 100}
+                max={(bounds?.maxPositionPercent?.max ?? 0.5) * 100}
+                step={1}
+                suffix="%"
+                placeholder={bounds?.maxPositionPercent ? `${(bounds.maxPositionPercent.recommended * 100).toFixed(0)}` : '—'}
+                style={{ width: '100%' }}
+              />
+              <div style={{ marginTop: 4, fontSize: 12, color: '#8c8c8c' }}>
+                {result?.fullConfig.maxPositionUsdt && (
+                  <span>= <Text strong style={{ fontSize: 12 }}>{parseFloat(result.fullConfig.maxPositionUsdt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text> USDT</span>
+                )}
+                {bounds?.maxPositionPercent && (
+                  <span style={{ marginLeft: result?.fullConfig.maxPositionUsdt ? 12 : 0 }}>
+                    推荐: {(bounds.maxPositionPercent.recommended * 100).toFixed(0)}%
+                  </span>
+                )}
+              </div>
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item
+              label="日亏上限"
+              tooltip="每日最大亏损占可用余额的百分比，触发后策略暂停冷却"
+              style={{ marginBottom: 0 }}
+            >
+              <InputNumber
+                value={maxDailyLossPercent != null ? Math.round(maxDailyLossPercent * 1000) / 10 : (result?.fullConfig.maxDailyLossPercent != null ? Math.round(result.fullConfig.maxDailyLossPercent * 1000) / 10 : undefined)}
+                onChange={(val) => {
+                  if (val == null) {
+                    setMaxDailyLossPercent(undefined);
+                  } else {
+                    setMaxDailyLossPercent(val / 100);
+                  }
+                }}
+                min={(bounds?.maxDailyLossPercent?.min ?? 0.01) * 100}
+                max={(bounds?.maxDailyLossPercent?.max ?? 0.2) * 100}
+                step={0.5}
+                suffix="%"
+                placeholder={bounds?.maxDailyLossPercent ? `${(bounds.maxDailyLossPercent.recommended * 100).toFixed(0)}` : '—'}
+                style={{ width: '100%' }}
+              />
+              <div style={{ marginTop: 4, fontSize: 12, color: '#8c8c8c' }}>
+                {result?.fullConfig.maxDailyLossUsdt && (
+                  <span>= <Text strong style={{ fontSize: 12 }}>{parseFloat(result.fullConfig.maxDailyLossUsdt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text> USDT</span>
+                )}
+                {bounds?.maxDailyLossPercent && (
+                  <span style={{ marginLeft: result?.fullConfig.maxDailyLossUsdt ? 12 : 0 }}>
+                    推荐: {(bounds.maxDailyLossPercent.recommended * 100).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+            </Form.Item>
+          </Col>
+        </Row>
       </div>
 
       <Divider />

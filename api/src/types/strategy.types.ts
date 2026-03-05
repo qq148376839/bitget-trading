@@ -38,6 +38,10 @@ export interface BaseStrategyConfig {
   leverage?: string;
   direction?: StrategyDirection;
 
+  // 风控百分比（0-1，用于 auto-calc 输入/输出 + 前端展示）
+  maxPositionPercent?: number;   // 如 0.2 = 20%
+  maxDailyLossPercent?: number;  // 如 0.05 = 5%
+
   // 通用风控
   maxDrawdownPercent: number;
   stopLossPercent: number;

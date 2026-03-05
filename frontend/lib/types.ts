@@ -40,6 +40,8 @@ export interface BaseStrategyConfig {
   marginCoin?: string;
   leverage?: string;
   direction?: StrategyDirection;
+  maxPositionPercent?: number;   // 0-1，如 0.2 = 20%
+  maxDailyLossPercent?: number;  // 0-1，如 0.05 = 5%
   maxDrawdownPercent: number;
   stopLossPercent: number;
   maxDailyLossUsdt: string;

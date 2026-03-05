@@ -147,10 +147,11 @@ export class AutoCalcService {
     };
 
     if (strategyType === 'scalping') {
+      const volPct = range24h / currentPrice;
       bounds.priceSpread = {
         min: this.roundToPrice(minSpread, spec.pricePlace),
         recommended: this.roundToPrice(
-          Math.max(minSpread * 2.0, range24h * 0.001),
+          Math.max(minSpread * 2.0, currentPrice * Math.max(volPct * 0.03, 0.0015)),
           spec.pricePlace
         ),
         max: this.roundToPrice(range24h * 0.05, spec.pricePlace),
@@ -194,14 +195,20 @@ export class AutoCalcService {
     // 买单 post_only = maker fee, 卖单可能 taker
     const totalFeeRate = spec.makerFeeRate + spec.takerFeeRate;
     const minPriceSpread = currentPrice * totalFeeRate * preset.spreadMultiplier;
-    const recommendedSpread = Math.max(minPriceSpread, range24h * 0.001);
+    // 波动率自适应下限：基于 24h 波动幅度百分比
+    // 波动幅度 = range24h / currentPrice（如 DOGE ≈ 12%, BTC ≈ 3%）
+    // 价差下限 = 价格 × 波动幅度 × 0.03（波动幅度的 3%）
+    // 并设绝对下限 = 价格 × 0.15%（防止极低波动时价差太小）
+    const volatilityPercent = range24h / currentPrice;
+    const volatilityFloor = currentPrice * Math.max(volatilityPercent * 0.03, 0.0015);
+    const recommendedSpread = Math.max(minPriceSpread, volatilityFloor);
     const priceSpread = this.roundToPrice(recommendedSpread, spec.pricePlace);
 
     derivations.push({
       field: 'priceSpread',
       value: String(priceSpread),
-      formula: `max(${currentPrice} x (${spec.makerFeeRate} + ${spec.takerFeeRate}) x ${preset.spreadMultiplier}, ${range24h.toFixed(2)} x 0.001)`,
-      explanation: `价差 = max(最小盈利价差, 24h波动范围x0.001)。最小盈利价差基于当前价、maker+taker手续费、风险乘数计算`,
+      formula: `max(${currentPrice} x ${totalFeeRate.toFixed(4)} x ${preset.spreadMultiplier}, ${currentPrice} x max(${(volatilityPercent * 100).toFixed(1)}% x 0.03, 0.15%))`,
+      explanation: `价差 = max(最小盈利价差, 波动率自适应下限)。24h波动${(volatilityPercent * 100).toFixed(1)}%，下限取波动幅度的3%与0.15%中较大值`,
     });
 
     // 方向感知的仓位百分比推荐

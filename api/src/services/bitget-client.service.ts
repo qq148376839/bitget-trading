@@ -12,6 +12,20 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('bitget-client');
 
+/** 可重试的网络错误码 */
+const RETRYABLE_CODES = new Set([
+  'ECONNABORTED',  // 超时
+  'ECONNRESET',    // 连接重置（SNI 阻断 / 代理不稳定）
+  'ECONNREFUSED',  // 连接拒绝
+  'ETIMEDOUT',     // 连接超时
+  'EPIPE',         // 管道断开
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+  'EAI_AGAIN',     // DNS 临时失败
+]);
+
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [500, 1000, 2000]; // ms
+
 export interface BitgetResponse<T = unknown> {
   code: string;
   msg: string;
@@ -97,15 +111,14 @@ export class BitgetClientService {
       ? '?' + new URLSearchParams(params).toString()
       : '';
     const requestPath = path + queryString;
-    const headers = this.getAuthHeaders('GET', requestPath, '');
 
-    try {
+    return this.withRetry('GET', path, async () => {
+      // 每次重试重新签名（timestamp 不能过旧）
+      const headers = this.getAuthHeaders('GET', requestPath, '');
       const response = await this.client.get<BitgetResponse<T>>(requestPath, { headers });
       this.checkResponse(response.data);
       return response.data;
-    } catch (error) {
-      throw this.handleError(error, 'GET', path);
-    }
+    });
   }
 
   /**
@@ -113,15 +126,13 @@ export class BitgetClientService {
    */
   async post<T>(path: string, data: Record<string, unknown>): Promise<BitgetResponse<T>> {
     const body = JSON.stringify(data);
-    const headers = this.getAuthHeaders('POST', path, body);
 
-    try {
+    return this.withRetry('POST', path, async () => {
+      const headers = this.getAuthHeaders('POST', path, body);
       const response = await this.client.post<BitgetResponse<T>>(path, data, { headers });
       this.checkResponse(response.data);
       return response.data;
-    } catch (error) {
-      throw this.handleError(error, 'POST', path);
-    }
+    });
   }
 
   /**
@@ -133,13 +144,55 @@ export class BitgetClientService {
       config.params = params;
     }
 
-    try {
+    return this.withRetry('GET', path, async () => {
       const response = await this.client.get<BitgetResponse<T>>(path, config);
       this.checkResponse(response.data);
       return response.data;
-    } catch (error) {
-      throw this.handleError(error, 'GET', path);
+    });
+  }
+
+  /**
+   * 网络层自动重试：仅对网络错误（超时/RESET/REFUSED）重试
+   * 业务错误（4xx 等）不重试，直接抛出
+   */
+  private async withRetry<T>(method: string, path: string, fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+        // 只对网络错误重试
+        if (!this.isRetryable(error) || attempt >= MAX_RETRIES) {
+          throw this.handleError(error, method, path);
+        }
+        const delay = RETRY_DELAYS[attempt] ?? 2000;
+        logger.warn(`网络错误，${delay}ms 后重试 (${attempt + 1}/${MAX_RETRIES})`, {
+          method, path,
+          error: axios.isAxiosError(error) ? error.code || error.message : String(error),
+        });
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
+    throw this.handleError(lastError, method, path);
+  }
+
+  /**
+   * 判断错误是否可重试（仅网络层错误）
+   */
+  private isRetryable(error: unknown): boolean {
+    if (error instanceof AppError) return false; // 业务错误不重试
+    if (axios.isAxiosError(error)) {
+      // 有 HTTP 响应的不重试（4xx/5xx 等业务错误）
+      if (error.response) return false;
+      // 纯网络错误：超时、连接重置等
+      if (error.code && RETRYABLE_CODES.has(error.code)) return true;
+      // axios 超时
+      if (error.message?.includes('timeout')) return true;
+      // ECONNRESET 在 message 中
+      if (error.message?.includes('ECONNRESET')) return true;
+    }
+    return false;
   }
 
   /**

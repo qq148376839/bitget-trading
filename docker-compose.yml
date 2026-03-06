@@ -11,6 +11,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - NODE_ENV=production
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
     depends_on:
       postgres:
         condition: service_healthy

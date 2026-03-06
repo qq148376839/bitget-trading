@@ -213,7 +213,7 @@ export class AutoCalcService {
 
     // 方向感知的仓位百分比推荐
     const dirMultiplier = direction === 'both' ? 1.5 : 1.0;
-    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.5);
+    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.8);
     const maxPositionPercent = input.maxPositionPercent ?? recommendedPositionPercent;
     const maxPositionUsdt = this.roundToUsdt(balanceNum * maxPositionPercent);
 
@@ -222,10 +222,10 @@ export class AutoCalcService {
       value: `${(maxPositionPercent * 100).toFixed(1)}%`,
       formula: input.maxPositionPercent
         ? `用户指定 ${(input.maxPositionPercent * 100).toFixed(1)}%`
-        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.5) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
+        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.8) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
       explanation: input.maxPositionPercent
         ? `用户自定义仓位上限百分比`
-        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限50%`,
+        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限80%${direction === 'both' ? '，双向模式每方向各占一半' : ''}`,
     });
     derivations.push({
       field: 'maxPositionUsdt',
@@ -345,7 +345,7 @@ export class AutoCalcService {
       maxPositionPercent: {
         min: 0.05,
         recommended: recommendedPositionPercent,
-        max: 0.5,
+        max: 0.8,
       },
       maxDailyLossPercent: {
         min: 0.01,
@@ -432,7 +432,7 @@ export class AutoCalcService {
 
     // 方向感知的仓位百分比推荐
     const dirMultiplier = direction === 'both' ? 1.5 : 1.0;
-    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.5);
+    const recommendedPositionPercent = Math.min(preset.maxPositionPercent * dirMultiplier, 0.8);
     const maxPositionPercent = input.maxPositionPercent ?? recommendedPositionPercent;
     const maxPositionUsdt = this.roundToUsdt(balanceNum * maxPositionPercent);
 
@@ -441,10 +441,10 @@ export class AutoCalcService {
       value: `${(maxPositionPercent * 100).toFixed(1)}%`,
       formula: input.maxPositionPercent
         ? `用户指定 ${(input.maxPositionPercent * 100).toFixed(1)}%`
-        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.5) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
+        : `min(${preset.maxPositionPercent} x ${dirMultiplier}, 0.8) = ${(recommendedPositionPercent * 100).toFixed(1)}%`,
       explanation: input.maxPositionPercent
         ? `用户自定义仓位上限百分比`
-        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限50%`,
+        : `仓位上限 = 预设(${(preset.maxPositionPercent * 100).toFixed(0)}%) x 方向系数(${direction === 'both' ? '双向1.5' : '单向1.0'})，上限80%${direction === 'both' ? '，双向模式每方向各占一半' : ''}`,
     });
     derivations.push({
       field: 'maxPositionUsdt',
@@ -560,7 +560,7 @@ export class AutoCalcService {
       maxPositionPercent: {
         min: 0.05,
         recommended: recommendedPositionPercent,
-        max: 0.5,
+        max: 0.8,
       },
       maxDailyLossPercent: {
         min: 0.01,

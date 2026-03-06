@@ -417,7 +417,7 @@ export default function SimpleConfigForm({
                   }
                 }}
                 min={(bounds?.maxPositionPercent?.min ?? 0.05) * 100}
-                max={(bounds?.maxPositionPercent?.max ?? 0.5) * 100}
+                max={(bounds?.maxPositionPercent?.max ?? 0.8) * 100}
                 step={1}
                 suffix="%"
                 placeholder={bounds?.maxPositionPercent ? `${(bounds.maxPositionPercent.recommended * 100).toFixed(0)}` : '—'}

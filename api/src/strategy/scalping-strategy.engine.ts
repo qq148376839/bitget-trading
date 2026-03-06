@@ -806,10 +806,22 @@ export class ScalpingStrategyEngine implements IStrategy {
             });
           }
         } catch (error) {
-          logger.warn('查询订单详情失败，跳过本轮', {
-            orderId: order.orderId,
-            error: String(error),
-          });
+          const errMsg = String(error);
+          // 40109 = 订单不存在 → 标记为 cancelled，避免死循环查询
+          if (errMsg.includes('40109')) {
+            logger.warn('订单在交易所不存在(40109)，标记为已取消', {
+              orderId: order.orderId,
+              side: order.side,
+              direction: order.direction,
+            });
+            this.tracker.markCancelled(order.orderId);
+            this.persistenceService.persistOrderStatusChange(order.orderId, 'cancelled', null, null);
+          } else {
+            logger.warn('查询订单详情失败，跳过本轮', {
+              orderId: order.orderId,
+              error: errMsg,
+            });
+          }
         }
       }
 

@@ -242,17 +242,63 @@ export class ScalpingStrategyEngine implements IStrategy {
       this.tradeCount = 0;
       this.realizedPnl = 0;
 
-      // 尝试从 DB 恢复 pending 订单
+      // 尝试从 DB 恢复 pending 订单（启动时对账：与交易所核实真实状态）
       try {
         const pendingOrders = await this.persistenceService.loadPendingOrders(
           finalConfig.symbol,
           finalConfig.productType || ''
         );
         if (pendingOrders.length > 0) {
+          let kept = 0;
+          let reconcilledFilled = 0;
+          let reconcilledCancelled = 0;
+          let reconcilledError = 0;
+
           for (const order of pendingOrders) {
-            this.tracker.addOrder(order);
+            try {
+              const detail = await this.orderService.getOrderDetail(finalConfig.symbol, order.orderId);
+
+              if (detail.state === 'live' || detail.state === 'partially_filled') {
+                // 订单仍在交易所活跃 → 保留追踪
+                this.tracker.addOrder(order);
+                kept++;
+              } else if (detail.state === 'filled') {
+                // 已成交但 DB 未更新 → 同步状态
+                this.persistenceService.persistOrderStatusChange(
+                  order.orderId, 'filled', Date.now(), order.linkedOrderId
+                );
+                reconcilledFilled++;
+              } else {
+                // cancelled 等其他状态 → 同步状态
+                this.persistenceService.persistOrderStatusChange(
+                  order.orderId, 'cancelled', null, null
+                );
+                reconcilledCancelled++;
+              }
+            } catch (orderError) {
+              const errMsg = String(orderError);
+              if (errMsg.includes('40109')) {
+                // 订单在交易所不存在 → 标记取消
+                this.persistenceService.persistOrderStatusChange(
+                  order.orderId, 'cancelled', null, null
+                );
+                reconcilledCancelled++;
+              } else {
+                // 查询失败（网络等）→ 保守保留，让 Loop B 后续对账
+                this.tracker.addOrder(order);
+                kept++;
+                reconcilledError++;
+              }
+            }
           }
-          logger.info('Recovering pending orders', { count: pendingOrders.length });
+
+          logger.info('启动对账完成', {
+            total: pendingOrders.length,
+            kept,
+            filled: reconcilledFilled,
+            cancelled: reconcilledCancelled,
+            queryErrors: reconcilledError,
+          });
         }
       } catch (error) {
         logger.warn('恢复 pending 订单失败', { error: String(error) });

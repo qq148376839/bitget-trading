@@ -499,18 +499,31 @@ export class ScalpingStrategyEngine implements IStrategy {
     try {
       const config = this.configManager!.getScalpingConfig();
       const directions = this.getActiveDirections(config);
+      const isBothDir = directions.length > 1;
 
-      // 风控检查（共享资金池）
-      const positionUsdt = parseFloat(this.tracker.getTotalPositionUsdt());
-      const riskCheck = this.riskController!.checkCanTrade(positionUsdt);
-      if (!riskCheck.canTrade) {
+      // 风控检查（冷却期、日亏、回撤等全局检查）
+      const totalPositionUsdt = parseFloat(this.tracker.getTotalPositionUsdt());
+      const riskCheck = this.riskController!.checkCanTrade(totalPositionUsdt);
+      if (!riskCheck.canTrade && !riskCheck.reason?.includes('已达上限')) {
+        // 非仓位上限的风控拒绝（冷却期、日亏、回撤等）→ 全部停止
         logger.debug('风控拒绝交易', { reason: riskCheck.reason });
         this.scheduleLoopA();
         return;
       }
 
-      // 对每个方向执行入场逻辑
+      // 对每个方向执行入场逻辑（仓位上限按方向分配）
       for (const dir of directions) {
+        // 双向模式：每方向仓位上限 = maxPositionUsdt / 2
+        const dirPositionUsdt = parseFloat(this.tracker.getTotalPositionUsdtByDirection(dir));
+        const maxPosition = parseFloat(config.maxPositionUsdt) * (isBothDir ? 0.5 : 1.0);
+        if (dirPositionUsdt >= maxPosition) {
+          logger.debug(`${dir} 方向仓位已达上限`, {
+            dirPositionUsdt: dirPositionUsdt.toFixed(2),
+            maxPosition: maxPosition.toFixed(2),
+            isBothDir,
+          });
+          continue;
+        }
         await this.runLoopAForDirection(dir, config);
       }
 
